@@ -1,0 +1,32 @@
+version: '3'
+
+services:
+  rtmp-server:
+    build: .
+    ports:
+      - "1935:1935"
+      - "8080:8080"
+    volumes:
+      - recordings:/recordings
+    networks:
+      - rtmp-network
+    restart: unless-stopped
+
+  test:
+    build: 
+      context: ./test
+      dockerfile: Dockerfile
+    depends_on:
+      - rtmp-server
+    networks:
+      - rtmp-network
+    environment:
+      - RTMP_URL=rtmp://rtmp-server:1935/live/stream
+      - NGINX_STATUS_URL=http://rtmp-server:8080/status
+
+volumes:
+  recordings:
+
+networks:
+  rtmp-network:
+    driver: bridge 
