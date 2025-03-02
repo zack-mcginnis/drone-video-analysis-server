@@ -8,7 +8,13 @@ services:
       - "8080:8080"
     volumes:
       - recordings:/recordings
+    networks:
+      - rtmp-network
     restart: unless-stopped
 
 volumes:
-  recordings: 
+  recordings:
+
+networks:
+  rtmp-network:
+    driver: bridge 
