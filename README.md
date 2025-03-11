@@ -63,6 +63,7 @@ The web client runs locally on the host machine (not in a Docker container).
 3. **Start the web application**
    ```bash
    cd webapp-client
+   cp .env.example .env  # Create your environment file
    yarn install
    yarn start
    ```
