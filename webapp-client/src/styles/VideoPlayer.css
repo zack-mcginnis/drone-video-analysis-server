@@ -1,0 +1,36 @@
+.video-container {
+  width: 100%;
+  max-width: 1000px;
+  margin: 0 auto;
+  background-color: #1e1e1e;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+
+.video-player {
+  width: 100%;
+  aspect-ratio: 16/9;
+  background-color: #000;
+}
+
+.video-info {
+  padding: 15px;
+  text-align: left;
+  border-top: 1px solid #333;
+}
+
+.status-indicator {
+  display: inline-block;
+  padding: 3px 8px;
+  background-color: #4CAF50;
+  color: white;
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+
+@media (max-width: 768px) {
+  .video-container {
+    width: 100%;
+  }
+} 
