@@ -1,15 +1,36 @@
 #!/bin/bash
 # Script to deploy RTMP server to an existing AWS Lightsail instance
 
-# Configuration - MODIFY THESE VALUES
-PUBLIC_IP="YOUR_STATIC_IP_ADDRESS"  # Your static IP
-SSH_KEY_PATH="~/.ssh/id_rsa"  # Path to your SSH key
-SSH_USER="ec2-user"  # Default user for Amazon Linux 2/2023
-DOMAIN_NAME=""  # Your custom domain
+# Load environment variables from .env file
+if [ -f .env ]; then
+    echo "Loading configuration from .env file..."
+    export $(grep -v '^#' .env | xargs)
+else
+    echo "No .env file found. Creating one from .env.example..."
+    if [ -f .env.example ]; then
+        cp .env.example .env
+        echo ".env file created. Please edit it with your configuration and run the script again."
+        exit 1
+    else
+        echo "Error: No .env.example file found. Please create a .env file with your configuration."
+        echo "Required variables: PUBLIC_IP, SSH_KEY_PATH, SSH_USER, DOMAIN_NAME"
+        exit 1
+    fi
+fi
 
-# Validate inputs
-if [[ "$PUBLIC_IP" == "YOUR_STATIC_IP_ADDRESS" ]]; then
-    echo "Error: Please edit the script to set your static IP address."
+# Validate required environment variables
+if [ -z "$PUBLIC_IP" ]; then
+    echo "Error: PUBLIC_IP is not set in .env file."
+    exit 1
+fi
+
+if [ -z "$SSH_KEY_PATH" ]; then
+    echo "Error: SSH_KEY_PATH is not set in .env file."
+    exit 1
+fi
+
+if [ -z "$SSH_USER" ]; then
+    echo "Error: SSH_USER is not set in .env file."
     exit 1
 fi
 

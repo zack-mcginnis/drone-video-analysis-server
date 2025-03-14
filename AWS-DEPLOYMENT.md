@@ -9,6 +9,24 @@ This guide explains how to deploy the RTMP server to AWS Lightsail with HTTPS su
 3. SSH key pair
 4. AWS Load Balancer configured with SSL/TLS certificate
 
+## Deployment Configuration
+
+1. Create a `.env` file with your deployment configuration:
+   ```
+   # AWS Lightsail Deployment Configuration
+   PUBLIC_IP=YOUR_STATIC_IP_ADDRESS
+   SSH_KEY_PATH=PATH_TO_YOUR_SSH_KEY
+   SSH_USER=ec2-user
+   DOMAIN_NAME=YOUR_DOMAIN_NAME
+   ```
+
+   You can copy the `.env.example` file as a starting point:
+   ```
+   cp .env.example .env
+   ```
+
+2. Edit the `.env` file with your specific configuration.
+
 ## Deployment to a New Instance
 
 1. Make sure you have the AWS CLI installed and configured:
@@ -34,12 +52,7 @@ This guide explains how to deploy the RTMP server to AWS Lightsail with HTTPS su
 
 If you already have a Lightsail instance with a static IP:
 
-1. Edit the `deploy-to-aws.sh` script to set your static IP address and SSH key path:
-   ```bash
-   PUBLIC_IP="YOUR_STATIC_IP_ADDRESS"  # Replace with your static IP
-   SSH_KEY_PATH="~/.ssh/id_rsa"        # Path to your SSH key
-   ```
-
+1. Update your `.env` file with your static IP address and SSH key path.
 2. Run the deployment script:
    ```
    ./deploy-to-aws.sh
@@ -54,6 +67,20 @@ Since you're using an AWS Load Balancer with an SSL/TLS certificate:
    - HTTP: `http://YOUR_DOMAIN/hls/drone_stream.m3u8`
    - HTTPS: `https://YOUR_DOMAIN/hls/drone_stream.m3u8`
 3. The HTTPS connection is secure with a valid certificate provided by the Load Balancer.
+
+## CORS Configuration
+
+The NGINX configuration includes CORS headers to allow access from specific origins. If you need to add more allowed origins, edit the `nginx.conf` file:
+
+```nginx
+# Map to handle CORS for multiple origins
+# NOTE: add your custom origin here
+map $http_origin $cors_origin {
+    default "";
+    "http://localhost:3000" $http_origin;
+    "https://your-app-domain.com" $http_origin;
+}
+```
 
 ## Manual Deployment
 
