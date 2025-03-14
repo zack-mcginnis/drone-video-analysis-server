@@ -1,12 +1,13 @@
-# AWS Deployment Guide for RTMP Server
+# AWS Deployment Guide for RTMP Server with Load Balancer
 
-This guide explains how to deploy the RTMP server to AWS Lightsail.
+This guide explains how to deploy the RTMP server to AWS Lightsail with HTTPS support through an AWS Load Balancer.
 
 ## Prerequisites
 
 1. AWS account
 2. AWS CLI installed and configured
 3. SSH key pair
+4. AWS Load Balancer configured with SSL/TLS certificate
 
 ## Deployment to a New Instance
 
@@ -44,6 +45,16 @@ If you already have a Lightsail instance with a static IP:
    ./deploy-to-aws.sh
    ```
 
+## HTTPS Support with AWS Load Balancer
+
+Since you're using an AWS Load Balancer with an SSL/TLS certificate:
+
+1. The Load Balancer handles SSL termination, so the RTMP server doesn't need to manage certificates.
+2. Your stream is accessible via both HTTP and HTTPS:
+   - HTTP: `http://YOUR_DOMAIN/hls/drone_stream.m3u8`
+   - HTTPS: `https://YOUR_DOMAIN/hls/drone_stream.m3u8`
+3. The HTTPS connection is secure with a valid certificate provided by the Load Balancer.
+
 ## Manual Deployment
 
 If you prefer to deploy manually:
@@ -62,7 +73,7 @@ If you prefer to deploy manually:
 5. Build and run the Docker container:
    ```
    docker build -t rtmp-server .
-   docker run -d --restart always -p 1935:1935 -p 8080:8080 --name rtmp-server-container rtmp-server
+   docker run -d --restart always -p 1935:1935 -p 80:80 -p 8080:8080 --name rtmp-server-container rtmp-server
    ```
 
 ## Costs
@@ -70,10 +81,10 @@ If you prefer to deploy manually:
 - AWS Lightsail nano instance ($3.50/month)
 - Data transfer: First 1TB/month is included in the instance price
 - Static IP: $0.005/hour (~$3.60/month) when not attached to a running instance
+- AWS Load Balancer: Additional costs apply
 
 ## Security Considerations
 
-For production use:
-1. Update the nginx.conf file to restrict who can publish to your RTMP server
-2. Set up SSL for secure connections
+1. The AWS Load Balancer provides a secure HTTPS connection with a valid certificate
+2. Consider restricting who can publish to your RTMP server
 3. Consider setting up a CDN for large audiences 

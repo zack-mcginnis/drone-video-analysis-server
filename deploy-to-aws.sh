@@ -5,6 +5,7 @@
 PUBLIC_IP="YOUR_STATIC_IP_ADDRESS"  # Your static IP
 SSH_KEY_PATH="~/.ssh/id_rsa"  # Path to your SSH key
 SSH_USER="ec2-user"  # Default user for Amazon Linux 2/2023
+DOMAIN_NAME=""  # Your custom domain
 
 # Validate inputs
 if [[ "$PUBLIC_IP" == "YOUR_STATIC_IP_ADDRESS" ]]; then
@@ -85,52 +86,106 @@ echo "Building and running the Docker container..."
 ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no $SSH_USER@$PUBLIC_IP << 'EOF'
     cd ~/rtmp-server
     
-    # Make start.sh executable
-    chmod +x start.sh
-    
     # Build Docker image (using sudo since we haven't re-logged in yet)
     sudo docker build -t rtmp-server .
     
     # Run container
-    sudo docker run -d --restart always -p 1935:1935 -p 8080:8080 --name rtmp-server-container rtmp-server
+    sudo docker run -d --restart always \
+        -p 1935:1935 \
+        -p 80:80 \
+        -p 8080:8080 \
+        --name rtmp-server-container rtmp-server
     
     echo "Docker container started. You may need to log out and back in to use Docker without sudo."
 EOF
 
 echo "RTMP server deployed successfully!"
 echo "RTMP URL: rtmp://$PUBLIC_IP/live"
-echo "HLS URL: http://$PUBLIC_IP:8080/hls/drone_stream.m3u8"
-echo ""
-echo "Update your webapp-client/.env file with:"
-echo "REACT_APP_HLS_STREAM_URL=http://$PUBLIC_IP:8080/hls/drone_stream.m3u8"
+
+# Display URLs based on whether a domain name is provided
+if [ -n "$DOMAIN_NAME" ]; then
+    echo "Custom Domain: $DOMAIN_NAME"
+    echo "HLS URL (HTTP): http://$DOMAIN_NAME/hls/drone_stream.m3u8"
+    echo "HLS URL (HTTPS): https://$DOMAIN_NAME/hls/drone_stream.m3u8"
+    echo ""
+    echo "Update your webapp-client/.env file with one of these URLs:"
+    echo "For HTTP: REACT_APP_HLS_STREAM_URL=http://$DOMAIN_NAME/hls/drone_stream.m3u8"
+    echo "For HTTPS: REACT_APP_HLS_STREAM_URL=https://$DOMAIN_NAME/hls/drone_stream.m3u8"
+else
+    echo "HLS URL (HTTP): http://$PUBLIC_IP:8080/hls/drone_stream.m3u8"
+    echo ""
+    echo "Update your webapp-client/.env file with this URL:"
+    echo "REACT_APP_HLS_STREAM_URL=http://$PUBLIC_IP:8080/hls/drone_stream.m3u8"
+fi
 
 # Verify endpoints are accessible
 echo "Verifying endpoints..."
-echo "Checking HLS endpoint..."
+
+# Check if direct IP HTTP endpoint is accessible
+echo "Checking direct IP HTTP endpoint..."
 HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$PUBLIC_IP:8080/hls/drone_stream.m3u8)
 
 if [ "$HTTP_STATUS" == "200" ]; then
-    echo "✅ HLS endpoint is accessible (HTTP 200 OK)"
+    echo "✅ Direct IP HTTP endpoint is accessible (HTTP 200 OK)"
 elif [ "$HTTP_STATUS" == "404" ]; then
-    echo "⚠️ HLS endpoint returned 404 Not Found. This is normal if no stream is active yet."
+    echo "⚠️ Direct IP HTTP endpoint returned 404 Not Found. This is normal if no stream is active yet."
 else
-    echo "⚠️ HLS endpoint returned HTTP status $HTTP_STATUS"
+    echo "⚠️ Direct IP HTTP endpoint returned HTTP status $HTTP_STATUS"
 fi
 
-# Check if RTMP port is open
-echo "Checking if RTMP port is open..."
-if nc -z -w5 $PUBLIC_IP 1935; then
-    echo "✅ RTMP port 1935 is open and accepting connections"
-else
-    echo "❌ RTMP port 1935 is not accessible"
+# If a domain name is provided, check those endpoints too
+if [ -n "$DOMAIN_NAME" ]; then
+    # Check if domain HTTP endpoint is accessible
+    echo "Checking domain HTTP endpoint..."
+    DOMAIN_HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$DOMAIN_NAME/hls/drone_stream.m3u8)
+
+    if [ "$DOMAIN_HTTP_STATUS" == "200" ]; then
+        echo "✅ Domain HTTP endpoint is accessible (HTTP 200 OK)"
+    elif [ "$DOMAIN_HTTP_STATUS" == "404" ]; then
+        echo "⚠️ Domain HTTP endpoint returned 404 Not Found. This is normal if no stream is active yet."
+    else
+        echo "⚠️ Domain HTTP endpoint returned HTTP status $DOMAIN_HTTP_STATUS"
+    fi
+
+    # Check if domain HTTPS endpoint is accessible
+    echo "Checking domain HTTPS endpoint..."
+    DOMAIN_HTTPS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://$DOMAIN_NAME/hls/drone_stream.m3u8)
+
+    if [ "$DOMAIN_HTTPS_STATUS" == "200" ]; then
+        echo "✅ Domain HTTPS endpoint is accessible (HTTP 200 OK)"
+    elif [ "$DOMAIN_HTTPS_STATUS" == "404" ]; then
+        echo "⚠️ Domain HTTPS endpoint returned 404 Not Found. This is normal if no stream is active yet."
+    else
+        echo "⚠️ Domain HTTPS endpoint returned HTTP status $DOMAIN_HTTPS_STATUS"
+    fi
+
 fi
 
-# Check if HTTP port is open
-echo "Checking if HTTP port is open..."
-if nc -z -w5 $PUBLIC_IP 8080; then
-    echo "✅ HTTP port 8080 is open and accepting connections"
+# Check if ports are open on the direct IP
+echo "Checking if ports are open on the server..."
+if command -v nc &> /dev/null; then
+    # Check RTMP port
+    if nc -z -w5 $PUBLIC_IP 1935; then
+        echo "✅ RTMP port 1935 is open and accepting connections"
+    else
+        echo "❌ RTMP port 1935 is not accessible"
+    fi
+    
+    # Check HTTP port
+    if nc -z -w5 $PUBLIC_IP 80; then
+        echo "✅ HTTP port 80 is open and accepting connections"
+    else
+        echo "❌ HTTP port 80 is not accessible"
+    fi
+    
+    # Check legacy HTTP port
+    if nc -z -w5 $PUBLIC_IP 8080; then
+        echo "✅ Legacy HTTP port 8080 is open and accepting connections"
+    else
+        echo "❌ Legacy HTTP port 8080 is not accessible"
+    fi
 else
-    echo "❌ HTTP port 8080 is not accessible"
+    echo "⚠️ netcat (nc) not found, skipping port checks"
 fi
 
 # Check Docker container status
@@ -143,4 +198,13 @@ ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no $SSH_USER@$PUBLIC_IP << 'EOF'
     sudo docker logs rtmp-server-container --tail 10
 EOF
 
-echo "Verification complete!" 
+echo "Verification complete!"
+echo ""
+
+if [ -n "$DOMAIN_NAME" ]; then
+    echo "Your RTMP server is now deployed and accessible via your custom domain."
+    echo "The AWS Load Balancer is handling SSL/TLS termination for secure HTTPS connections."
+else
+    echo "Your RTMP server is now deployed and accessible via the direct IP address."
+    echo "Consider setting up a custom domain with an AWS Load Balancer for HTTPS support."
+fi 
