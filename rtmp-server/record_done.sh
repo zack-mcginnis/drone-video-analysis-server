@@ -1,0 +1,224 @@
+#!/bin/bash
+# Script to handle completed recordings
+
+# Get the full path of the recorded file
+RECORDING_PATH="$1"
+STREAM_NAME="$2"
+BASENAME="$3"
+
+# Log the recording completion
+echo "$(date): Recording completed: $RECORDING_PATH" >> /var/log/nginx/recording.log
+echo "$(date): Stream name: $STREAM_NAME, Basename: $BASENAME" >> /var/log/nginx/recording.log
+
+# Generate or retrieve a unique stream ID
+MAPPING_FILE="/recordings/stream_mappings.txt"
+mkdir -p "$(dirname "$MAPPING_FILE")"
+touch "$MAPPING_FILE"
+chmod 666 "$MAPPING_FILE"
+
+# Use flock to ensure atomic read/write of the mapping file
+STREAM_ID=""
+(
+    flock -x 200
+    
+    # Look for existing mapping for this stream name
+    EXISTING_ID=$(grep "^${STREAM_NAME}:" "$MAPPING_FILE" | cut -d':' -f2)
+    
+    if [ -n "$EXISTING_ID" ]; then
+        # Use existing stream ID
+        STREAM_ID="$EXISTING_ID"
+        echo "$(date): Using existing stream ID: $STREAM_ID" >> /var/log/nginx/recording.log
+    else
+        # Create a new stream ID with timestamp to ensure uniqueness
+        STREAM_ID="${STREAM_NAME}_$(date +"%Y%m%d_%H%M%S")"
+        # Save the mapping
+        echo "${STREAM_NAME}:${STREAM_ID}" >> "$MAPPING_FILE"
+        echo "$(date): Created new stream ID: $STREAM_ID" >> /var/log/nginx/recording.log
+    fi
+) 200>"$MAPPING_FILE.lock"
+
+# Double-check that we have a stream ID
+if [ -z "$STREAM_ID" ]; then
+    # Fallback if something went wrong with the mapping file
+    STREAM_ID="${STREAM_NAME}_$(date +"%Y%m%d_%H%M%S")"
+    echo "$(date): Using fallback stream ID: $STREAM_ID" >> /var/log/nginx/recording.log
+fi
+
+# Create stream directory immediately
+STREAM_DIR="/recordings/$STREAM_ID"
+mkdir -p "$STREAM_DIR"
+chmod 777 "$STREAM_DIR"
+echo "$(date): Ensuring stream directory exists: $STREAM_DIR" >> /var/log/nginx/recording.log
+
+# Get file size
+FILE_SIZE=$(stat -c%s "$RECORDING_PATH")
+
+# Determine file format from the file extension
+FILE_FORMAT=$(echo "$RECORDING_PATH" | awk -F. '{print $NF}')
+echo "$(date): File format detected: $FILE_FORMAT" >> /var/log/nginx/recording.log
+
+# Create a timestamped filename for the final destination
+TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+FINAL_PATH="$STREAM_DIR/${TIMESTAMP}.mp4"
+
+# If the file is FLV, convert it to MP4
+if [ "$FILE_FORMAT" = "flv" ]; then
+    echo "$(date): Converting FLV to MP4: $RECORDING_PATH -> $FINAL_PATH" >> /var/log/nginx/recording.log
+
+    # Use ffmpeg to convert FLV to MP4 directly to the stream directory
+    ffmpeg -i "$RECORDING_PATH" -c:v libx264 -c:a aac -movflags +faststart "$FINAL_PATH" -y >> /var/log/nginx/recording.log 2>&1
+
+    # Check if conversion was successful
+    if [ $? -eq 0 ]; then
+        echo "$(date): Conversion successful" >> /var/log/nginx/recording.log
+        # Remove the original FLV file to save space
+        rm "$RECORDING_PATH"
+        echo "$(date): Removed original FLV file" >> /var/log/nginx/recording.log
+        # Update recording path to the MP4 file
+        RECORDING_PATH="$FINAL_PATH"
+        FILE_FORMAT="mp4"
+    else
+        echo "$(date): Conversion failed, moving original FLV file to stream directory" >> /var/log/nginx/recording.log
+        # Move the original file to the stream directory with a timestamp
+        FINAL_PATH="$STREAM_DIR/${TIMESTAMP}.flv"
+        mv "$RECORDING_PATH" "$FINAL_PATH"
+        RECORDING_PATH="$FINAL_PATH"
+        echo "$(date): Moved original file to: $FINAL_PATH" >> /var/log/nginx/recording.log
+    fi
+else
+    # File is already MP4, just move it to the stream directory
+    echo "$(date): Moving MP4 file to stream directory: $RECORDING_PATH -> $FINAL_PATH" >> /var/log/nginx/recording.log
+    mv "$RECORDING_PATH" "$FINAL_PATH"
+    RECORDING_PATH="$FINAL_PATH"
+    echo "$(date): Moved MP4 file to: $FINAL_PATH" >> /var/log/nginx/recording.log
+fi
+
+# Function to send recording metadata to API server
+send_recording_metadata() {
+    local file_path="$1"
+    local s3_path="$2"
+    local environment="$3"
+    local file_format="$4"
+    
+    # Create JSON payload with stream ID
+    JSON_PAYLOAD=$(cat <<EOF
+{
+    "stream_name": "$STREAM_NAME",
+    "file_path": "$file_path",
+    "s3_path": "$s3_path",
+    "file_size": $FILE_SIZE,
+    "environment": "$environment",
+    "recording_metadata": {
+        "file_size": $FILE_SIZE,
+        "file_format": "$file_format",
+        "stream_id": "$STREAM_ID"
+    }
+}
+EOF
+)
+    
+    # Send to API server
+    API_SERVER=${API_SERVER:-"http://api-server:8000"}
+    
+    curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "$JSON_PAYLOAD" \
+        "$API_SERVER/recordings/" >> /var/log/nginx/recording.log 2>&1
+    
+    # Check if API call was successful
+    if [ $? -eq 0 ]; then
+        echo "Metadata sent to API server" >> /var/log/nginx/recording.log
+    else
+        echo "Failed to send metadata to API server" >> /var/log/nginx/recording.log
+    fi
+}
+
+# Check if we're running in AWS (check for instance metadata)
+if curl -s --connect-timeout 2 http://169.254.169.254/latest/meta-data/ > /dev/null; then
+    # We're running in AWS, upload to S3
+    
+    # Get the AWS region and bucket name from environment variables
+    AWS_REGION=${AWS_REGION}
+    S3_BUCKET=${S3_BUCKET}
+    USE_LIGHTSAIL_BUCKET=${USE_LIGHTSAIL_BUCKET:-"false"}
+    
+    # Create a directory structure for the stream in S3 using the unique stream ID
+    S3_PATH="s3://$S3_BUCKET/recordings/$STREAM_ID/"
+    S3_FILE_PATH="${S3_PATH}$(basename $RECORDING_PATH)"
+    
+    echo "Uploading recording to $S3_FILE_PATH" >> /var/log/nginx/recording.log
+    
+    # Install AWS CLI if not already installed
+    if ! command -v aws &> /dev/null; then
+        echo "Installing AWS CLI..." >> /var/log/nginx/recording.log
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip"
+        unzip -q /tmp/awscliv2.zip -d /tmp
+        /tmp/aws/install
+        rm -rf /tmp/aws /tmp/awscliv2.zip
+    fi
+    
+    # Upload the file to S3 or Lightsail bucket
+    if [ "$USE_LIGHTSAIL_BUCKET" = "true" ]; then
+        # For Lightsail buckets, we need to use a different endpoint
+        echo "Using Lightsail bucket endpoint" >> /var/log/nginx/recording.log
+        aws s3 cp "$RECORDING_PATH" "$S3_FILE_PATH" \
+            --region "$AWS_REGION" \
+            --endpoint-url "https://s3.${AWS_REGION}.amazonaws.com" \
+            >> /var/log/nginx/recording.log 2>&1
+    else
+        # Standard S3 bucket
+        aws s3 cp "$RECORDING_PATH" "$S3_FILE_PATH" --region "$AWS_REGION" >> /var/log/nginx/recording.log 2>&1
+    fi
+    
+    # Check if upload was successful
+    if [ $? -eq 0 ]; then
+        echo "Upload successful" >> /var/log/nginx/recording.log
+        
+        # Send metadata to API server
+        send_recording_metadata "$RECORDING_PATH" "$S3_FILE_PATH" "aws" "$FILE_FORMAT"
+        
+        # Remove the local file to save space since we're in AWS
+        rm "$RECORDING_PATH"
+        echo "Local file removed to save space" >> /var/log/nginx/recording.log
+    else
+        echo "Upload failed" >> /var/log/nginx/recording.log
+        
+        # Still send metadata to API server, but without S3 path
+        send_recording_metadata "$RECORDING_PATH" "" "aws" "$FILE_FORMAT"
+        
+        # Remove the local file anyway since we don't want to store on the server in AWS
+        rm "$RECORDING_PATH"
+        echo "Local file removed despite upload failure (AWS mode)" >> /var/log/nginx/recording.log
+    fi
+else
+    # We're running locally, file is already in the stream directory
+    
+    # Send metadata to API server with the path
+    send_recording_metadata "$RECORDING_PATH" "" "local" "$FILE_FORMAT"
+    
+    # Verify the file is playable
+    echo "$(date): Verifying file is playable..." >> /var/log/nginx/recording.log
+    ffprobe -v error "$RECORDING_PATH" >> /var/log/nginx/recording.log 2>&1
+    if [ $? -eq 0 ]; then
+        echo "$(date): File verification successful" >> /var/log/nginx/recording.log
+    else
+        echo "$(date): WARNING: File may not be playable" >> /var/log/nginx/recording.log
+    fi
+fi
+
+# Clean up any stray files in the root recordings directory
+find /recordings -maxdepth 1 -type f -name "*.mp4" -o -name "*.flv" | while read file; do
+    echo "$(date): Found stray file in root directory: $file" >> /var/log/nginx/recording.log
+    
+    # Determine which stream it belongs to (if possible)
+    if [[ "$file" == *"$STREAM_NAME"* ]]; then
+        # Move to the current stream directory
+        mv "$file" "$STREAM_DIR/$(basename "$file")"
+        echo "$(date): Moved stray file to $STREAM_DIR/$(basename "$file")" >> /var/log/nginx/recording.log
+    else
+        # Create a catch-all directory for unidentified files
+        mkdir -p "/recordings/unidentified"
+        mv "$file" "/recordings/unidentified/$(basename "$file")"
+        echo "$(date): Moved unidentified file to /recordings/unidentified/$(basename "$file")" >> /var/log/nginx/recording.log
+    fi
+done 

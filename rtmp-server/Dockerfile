@@ -1,10 +1,27 @@
 FROM tiangolo/nginx-rtmp
 
+# Install required packages
+RUN apt-get update && \
+    apt-get install -y curl unzip python3 ffmpeg && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create directories for recordings
+RUN mkdir -p /recordings && \
+    chmod 777 /recordings && \
+    mkdir -p /var/log/nginx
+
 # Copy nginx configuration
 COPY nginx.conf /etc/nginx/nginx.conf
 COPY start.sh /start.sh
+COPY record_done.sh /usr/local/bin/record_done.sh
 
-RUN chmod +x /start.sh
+# Make scripts executable
+RUN chmod +x /start.sh && \
+    chmod +x /usr/local/bin/record_done.sh
+
+# The environment variables are now passed at runtime via docker-compose.yml
+# or the docker run command, so we don't need to set defaults here
 
 EXPOSE 1935
 EXPOSE 80

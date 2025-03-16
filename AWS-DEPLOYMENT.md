@@ -115,3 +115,47 @@ If you prefer to deploy manually:
 1. The AWS Load Balancer provides a secure HTTPS connection with a valid certificate
 2. Consider restricting who can publish to your RTMP server
 3. Consider setting up a CDN for large audiences 
+
+## Recording Configuration
+
+The RTMP server is configured to record all streams. When a stream ends, the recording is saved and processed:
+
+1. **Local Development**: Recordings are saved to the `/recordings` directory inside the Docker container. You can access them at `http://localhost:8080/recordings/`.
+
+2. **AWS Deployment**: Recordings are uploaded to an AWS S3 bucket. To configure this:
+
+   a. Create an S3 bucket for your recordings
+   b. Update your `.env` file with the S3 bucket information:
+      ```
+      AWS_REGION=us-west-2
+      S3_BUCKET=your-bucket-name
+      AWS_ACCESS_KEY_ID=YOUR_ACCESS_KEY
+      AWS_SECRET_ACCESS_KEY=YOUR_SECRET_KEY
+      ```
+   c. Make sure the AWS credentials have permission to write to the S3 bucket
+
+3. **IAM Policy**: Create an IAM user with the following policy:
+   ```json
+   {
+       "Version": "2012-10-17",
+       "Statement": [
+           {
+               "Effect": "Allow",
+               "Action": [
+                   "s3:PutObject",
+                   "s3:GetObject",
+                   "s3:ListBucket"
+               ],
+               "Resource": [
+                   "arn:aws:s3:::your-bucket-name",
+                   "arn:aws:s3:::your-bucket-name/*"
+               ]
+           }
+       ]
+   }
+   ```
+
+4. **Accessing Recordings**: Recordings are organized in the S3 bucket by stream name and timestamp:
+   ```
+   s3://your-bucket-name/recordings/stream_name/YYYY/MM/DD/HH-MM-SS/recording.flv
+   ``` 

@@ -1,9 +1,0 @@
-version: '3'
-
-services:
-  rtmp-server:
-    build: ./rtmp-server
-    ports:
-      - "1935:1935"
-      - "8080:8080"
-    restart: always 

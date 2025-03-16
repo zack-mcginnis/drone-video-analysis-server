@@ -3,56 +3,53 @@
 
 # Load environment variables from .env file
 if [ -f .env ]; then
-    echo "Loading configuration from .env file..."
-    export $(grep -v '^#' .env | xargs)
-else
-    echo "No .env file found. Creating one from .env.example..."
-    if [ -f .env.example ]; then
-        cp .env.example .env
-        echo ".env file created. Please edit it with your configuration and run the script again."
-        exit 1
-    else
-        echo "Error: No .env.example file found. Please create a .env file with your configuration."
-        echo "Required variables: PUBLIC_IP, SSH_KEY_PATH, SSH_USER, DOMAIN_NAME"
+    export $(cat .env | grep -v '#' | awk '/=/ {print $1}')
+fi
+
+# Check if required environment variables are set
+if [ -z "$PUBLIC_IP" ] || [ -z "$SSH_KEY_PATH" ] || [ -z "$SSH_USER" ]; then
+    echo "Error: Required environment variables are not set."
+    echo "Please make sure PUBLIC_IP, SSH_KEY_PATH, and SSH_USER are set in the .env file."
+    exit 1
+fi
+
+# Check if AWS credentials are set
+if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+    echo "Warning: AWS credentials are not set in the .env file."
+    echo "S3 upload functionality will not work without AWS credentials."
+    read -p "Do you want to continue without AWS credentials? (y/n) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         exit 1
     fi
 fi
 
-# Validate required environment variables
-if [ -z "$PUBLIC_IP" ]; then
-    echo "Error: PUBLIC_IP is not set in .env file."
-    exit 1
+# Set default values for AWS region and S3 bucket if not provided
+AWS_REGION=${AWS_REGION:-"us-west-2"}
+S3_BUCKET=${S3_BUCKET:-"drone-video-recordings"}
+
+# Check if the SSH key has the correct permissions
+if [ "$(stat -c %a "$SSH_KEY_PATH")" != "600" ]; then
+    echo "Warning: SSH key file has incorrect permissions. Setting to 600..."
+    chmod 600 "$SSH_KEY_PATH"
 fi
 
-if [ -z "$SSH_KEY_PATH" ]; then
-    echo "Error: SSH_KEY_PATH is not set in .env file."
-    exit 1
-fi
+# Create a temporary directory for the project files
+TEMP_DIR=$(mktemp -d)
+echo "Creating temporary directory: $TEMP_DIR"
 
-if [ -z "$SSH_USER" ]; then
-    echo "Error: SSH_USER is not set in .env file."
-    exit 1
-fi
+# Copy necessary files to the temporary directory
+echo "Copying project files to temporary directory..."
+cp -r rtmp-server $TEMP_DIR/
+cp -r api-server $TEMP_DIR/
 
-echo "Deploying to Lightsail instance at $PUBLIC_IP..."
-
-# Expand the SSH key path if it uses ~
-SSH_KEY_PATH="${SSH_KEY_PATH/#\~/$HOME}"
-
-# Check if the SSH key exists
-if [ ! -f "$SSH_KEY_PATH" ]; then
-    echo "Error: SSH key not found at $SSH_KEY_PATH"
-    exit 1
-fi
-
-# Fix SSH key permissions
-echo "Setting correct permissions for SSH key..."
-chmod 600 "$SSH_KEY_PATH"
-echo "SSH key permissions updated."
+# Create a tarball of the project files
+echo "Creating project tarball..."
+tar -czf project.tar.gz -C $TEMP_DIR .
 
 # Connect to the instance and set up Docker
 echo "Setting up Docker on the instance..."
-ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no $SSH_USER@$PUBLIC_IP << 'EOF'
+ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no $SSH_USER@$PUBLIC_IP << 'SETUP_EOF'
     # Check OS version
     if grep -q "Amazon Linux 2023" /etc/os-release; then
         echo "Detected Amazon Linux 2023"
@@ -84,148 +81,119 @@ ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no $SSH_USER@$PUBLIC_IP << 'EOF'
         fi
     fi
     
-    # Create directory for RTMP server
-    mkdir -p ~/rtmp-server
-    
-    # We need to re-login to apply the docker group membership
-    # For now, use sudo for docker commands
-    
-    # Stop and remove existing container if it exists
-    if sudo docker ps -a | grep -q rtmp-server-container; then
-        echo "Stopping and removing existing container..."
-        sudo docker stop rtmp-server-container
-        sudo docker rm rtmp-server-container
-    fi
-EOF
+    # Create project directory if it doesn't exist
+    mkdir -p ~/drone-rtmp-project
+SETUP_EOF
 
-# Copy files to the instance
-echo "Copying files to the instance..."
-scp -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no rtmp-server/Dockerfile rtmp-server/nginx.conf rtmp-server/start.sh $SSH_USER@$PUBLIC_IP:~/rtmp-server/
+# Copy the project tarball to the server
+echo "Copying project files to the server..."
+scp -i "$SSH_KEY_PATH" project.tar.gz "$SSH_USER@$PUBLIC_IP:~/project.tar.gz"
 
-# Build and run the Docker container
-echo "Building and running the Docker container..."
-ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no $SSH_USER@$PUBLIC_IP << 'EOF'
-    cd ~/rtmp-server
+# Clean up local temporary files
+echo "Cleaning up local temporary files..."
+rm -rf $TEMP_DIR
+rm project.tar.gz
+
+# SSH into the server and deploy the Docker containers
+echo "Deploying Docker containers on the server..."
+ssh -i "$SSH_KEY_PATH" "$SSH_USER@$PUBLIC_IP" << 'EOF'
+    # Extract project files
+    echo "Extracting project files..."
+    mkdir -p ~/drone-rtmp-project
+    tar -xzf project.tar.gz -C ~/drone-rtmp-project
+    rm project.tar.gz
     
-    # Build Docker image (using sudo since we haven't re-logged in yet)
-    sudo docker build -t rtmp-server .
+    # Change to project directory
+    cd ~/drone-rtmp-project
     
-    # Run container
+    # Build Docker images on the server
+    echo "Building Docker images on the server..."
+    echo "Building RTMP server image..."
+    sudo docker build -t rtmp-server ./rtmp-server
+    echo "Building API server image..."
+    sudo docker build -t api-server ./api-server
+    
+    # Stop and remove existing containers
+    echo "Stopping and removing existing containers..."
+    sudo docker stop rtmp-server-container 2>/dev/null || true
+    sudo docker rm rtmp-server-container 2>/dev/null || true
+    sudo docker stop api-server-container 2>/dev/null || true
+    sudo docker rm api-server-container 2>/dev/null || true
+    
+    # Create a Docker network for the containers to communicate
+    echo "Creating Docker network..."
+    sudo docker network create drone-network 2>/dev/null || true
+    
+    # Deploy API server with environment variables from the .env file
+    echo "Deploying API server..."
     sudo docker run -d --restart always \
+        --name api-server-container \
+        --network drone-network \
+        -p 8000:8000 \
+        -e ENVIRONMENT=aws \
+        -e AWS_POSTGRES_HOST=ls-133099678d75bb2fede9f17404c4d2cb961b3090.ccl6i8m202bm.us-east-1.rds.amazonaws.com \
+        -e AWS_POSTGRES_PORT=5432 \
+        -e AWS_POSTGRES_DB=recordings \
+        -e AWS_POSTGRES_USER=dbmasteruser \
+        -e AWS_POSTGRES_PASSWORD=',>onBRIM9=7io%&%}p~n<hf6HzIL4A>w' \
+        -e AWS_REGION=us-east-1 \
+        -e S3_BUCKET=bucket-d8mdwm \
+        -e AWS_ACCESS_KEY_ID=AKIARWPFIU4PYNWUZF7X \
+        -e AWS_SECRET_ACCESS_KEY='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' \
+        -e USE_LIGHTSAIL_BUCKET=true \
+        api-server
+    
+    # Wait a moment for the container to start
+    sleep 5
+    
+    # Run migrations inside the container
+    echo "Running database migrations..."
+    sudo docker exec api-server-container python /app/scripts/run_migrations.py
+    
+    # Deploy RTMP server
+    echo "Deploying RTMP server..."
+    sudo docker run -d --restart always \
+        --name rtmp-server-container \
+        --network drone-network \
         -p 1935:1935 \
         -p 80:80 \
         -p 8080:8080 \
-        --name rtmp-server-container rtmp-server
+        -e AWS_REGION=$AWS_REGION \
+        -e S3_BUCKET=$S3_BUCKET \
+        -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID \
+        -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
+        -e API_SERVER=http://api-server-container:8000 \
+        rtmp-server
     
-    echo "Docker container started. You may need to log out and back in to use Docker without sudo."
+    # Check if containers are running
+    echo "Checking container status..."
+    sudo docker ps
 EOF
 
-echo "RTMP server deployed successfully!"
-echo "RTMP URL: rtmp://$PUBLIC_IP/live"
-
-# Display URLs based on whether a domain name is provided
-if [ -n "$DOMAIN_NAME" ]; then
-    echo "Custom Domain: $DOMAIN_NAME"
-    echo "HLS URL (HTTP): http://$DOMAIN_NAME/hls/drone_stream.m3u8"
-    echo "HLS URL (HTTPS): https://$DOMAIN_NAME/hls/drone_stream.m3u8"
-    echo ""
-    echo "Update your webapp-client/.env file with one of these URLs:"
-    echo "For HTTP: REACT_APP_HLS_STREAM_URL=http://$DOMAIN_NAME/hls/drone_stream.m3u8"
-    echo "For HTTPS: REACT_APP_HLS_STREAM_URL=https://$DOMAIN_NAME/hls/drone_stream.m3u8"
-else
-    echo "HLS URL (HTTP): http://$PUBLIC_IP:8080/hls/drone_stream.m3u8"
-    echo ""
-    echo "Update your webapp-client/.env file with this URL:"
-    echo "REACT_APP_HLS_STREAM_URL=http://$PUBLIC_IP:8080/hls/drone_stream.m3u8"
-fi
-
-# Verify endpoints are accessible
-echo "Verifying endpoints..."
-
-# Check if direct IP HTTP endpoint is accessible
-echo "Checking direct IP HTTP endpoint..."
-HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$PUBLIC_IP:8080/hls/drone_stream.m3u8)
-
-if [ "$HTTP_STATUS" == "200" ]; then
-    echo "✅ Direct IP HTTP endpoint is accessible (HTTP 200 OK)"
-elif [ "$HTTP_STATUS" == "404" ]; then
-    echo "⚠️ Direct IP HTTP endpoint returned 404 Not Found. This is normal if no stream is active yet."
-else
-    echo "⚠️ Direct IP HTTP endpoint returned HTTP status $HTTP_STATUS"
-fi
-
-# If a domain name is provided, check those endpoints too
-if [ -n "$DOMAIN_NAME" ]; then
-    # Check if domain HTTP endpoint is accessible
-    echo "Checking domain HTTP endpoint..."
-    DOMAIN_HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$DOMAIN_NAME/hls/drone_stream.m3u8)
-
-    if [ "$DOMAIN_HTTP_STATUS" == "200" ]; then
-        echo "✅ Domain HTTP endpoint is accessible (HTTP 200 OK)"
-    elif [ "$DOMAIN_HTTP_STATUS" == "404" ]; then
-        echo "⚠️ Domain HTTP endpoint returned 404 Not Found. This is normal if no stream is active yet."
-    else
-        echo "⚠️ Domain HTTP endpoint returned HTTP status $DOMAIN_HTTP_STATUS"
-    fi
-
-    # Check if domain HTTPS endpoint is accessible
-    echo "Checking domain HTTPS endpoint..."
-    DOMAIN_HTTPS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://$DOMAIN_NAME/hls/drone_stream.m3u8)
-
-    if [ "$DOMAIN_HTTPS_STATUS" == "200" ]; then
-        echo "✅ Domain HTTPS endpoint is accessible (HTTP 200 OK)"
-    elif [ "$DOMAIN_HTTPS_STATUS" == "404" ]; then
-        echo "⚠️ Domain HTTPS endpoint returned 404 Not Found. This is normal if no stream is active yet."
-    else
-        echo "⚠️ Domain HTTPS endpoint returned HTTP status $DOMAIN_HTTPS_STATUS"
-    fi
-
-fi
-
-# Check if ports are open on the direct IP
-echo "Checking if ports are open on the server..."
-if command -v nc &> /dev/null; then
-    # Check RTMP port
-    if nc -z -w5 $PUBLIC_IP 1935; then
-        echo "✅ RTMP port 1935 is open and accepting connections"
-    else
-        echo "❌ RTMP port 1935 is not accessible"
+# Check if deployment was successful
+if [ $? -eq 0 ]; then
+    echo "Deployment successful!"
+    echo "RTMP server is running at rtmp://$PUBLIC_IP/live"
+    echo "HLS stream is available at http://$PUBLIC_IP:8080/hls/drone_stream.m3u8"
+    echo "API server is running at http://$PUBLIC_IP:8000"
+    
+    # Update webapp-client/.env.aws if it exists
+    if [ -f webapp-client/.env.aws ]; then
+        echo "Updating webapp-client/.env.aws..."
+        sed -i "s|REACT_APP_HLS_STREAM_URL=.*|REACT_APP_HLS_STREAM_URL=http://$PUBLIC_IP:8080/hls/drone_stream.m3u8|g" webapp-client/.env.aws
+        if ! grep -q "REACT_APP_API_URL" webapp-client/.env.aws; then
+            echo "REACT_APP_API_URL=http://$PUBLIC_IP:8000" >> webapp-client/.env.aws
+        else
+            sed -i "s|REACT_APP_API_URL=.*|REACT_APP_API_URL=http://$PUBLIC_IP:8000|g" webapp-client/.env.aws
+        fi
     fi
     
-    # Check HTTP port
-    if nc -z -w5 $PUBLIC_IP 80; then
-        echo "✅ HTTP port 80 is open and accepting connections"
-    else
-        echo "❌ HTTP port 80 is not accessible"
-    fi
-    
-    # Check legacy HTTP port
-    if nc -z -w5 $PUBLIC_IP 8080; then
-        echo "✅ Legacy HTTP port 8080 is open and accepting connections"
-    else
-        echo "❌ Legacy HTTP port 8080 is not accessible"
+    # If a domain name is provided, suggest setting up a custom domain
+    if [ ! -z "$DOMAIN_NAME" ]; then
+        echo "To use your custom domain ($DOMAIN_NAME), set up DNS records to point to $PUBLIC_IP"
+        echo "Consider setting up a custom domain with an AWS Load Balancer for HTTPS support."
     fi
 else
-    echo "⚠️ netcat (nc) not found, skipping port checks"
-fi
-
-# Check Docker container status
-echo "Checking Docker container status on the server..."
-ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no $SSH_USER@$PUBLIC_IP << 'EOF'
-    echo "Docker container status:"
-    sudo docker ps | grep rtmp-server-container
-    
-    echo "Docker container logs (last 10 lines):"
-    sudo docker logs rtmp-server-container --tail 10
-EOF
-
-echo "Verification complete!"
-echo ""
-
-if [ -n "$DOMAIN_NAME" ]; then
-    echo "Your RTMP server is now deployed and accessible via your custom domain."
-    echo "The AWS Load Balancer is handling SSL/TLS termination for secure HTTPS connections."
-else
-    echo "Your RTMP server is now deployed and accessible via the direct IP address."
-    echo "Consider setting up a custom domain with an AWS Load Balancer for HTTPS support."
+    echo "Deployment failed!"
+    echo "Please check the logs for more information."
 fi 
