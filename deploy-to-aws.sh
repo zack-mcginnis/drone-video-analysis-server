@@ -164,6 +164,7 @@ ssh -i "$SSH_KEY_PATH" "$SSH_USER@$PUBLIC_IP" << EOF
         -p 1935:1935 \
         -p 80:80 \
         -p 8080:8080 \
+        -e ENVIRONMENT=aws \
         -e AWS_REGION=$AWS_REGION \
         -e S3_BUCKET=$S3_BUCKET \
         -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID \

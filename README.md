@@ -102,4 +102,19 @@ To use this system with a real DJI drone:
 - If the video doesn't appear, check the browser console for errors
 - Verify that the RTMP server is running with `docker-compose ps`
 - Check the RTMP server logs with `docker-compose logs rtmp-server`
-- Ensure the stream URL in the web app's `.env` file matches the actual stream path 
+- Ensure the stream URL in the web app's `.env` file matches the actual stream path
+
+## Environment Configuration
+
+This project uses a single `.env` file at the root directory for all environment variables:
+
+1. **Create your environment file**
+   ```bash
+   cp .env.example .env
+   ```
+
+2. **Edit the `.env` file** with your specific configuration values.
+
+3. **For local development**, the default values should work out of the box.
+
+4. **For AWS deployment**, you'll need to fill in the AWS-specific variables before running the deploy script. 

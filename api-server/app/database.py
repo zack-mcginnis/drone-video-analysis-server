@@ -16,11 +16,11 @@ ENVIRONMENT = os.getenv("ENVIRONMENT", "local")
 # Get database connection details based on environment
 if ENVIRONMENT.lower() == "aws":
     # Use AWS PostgreSQL configuration
-    POSTGRES_USER = os.getenv("POSTGRES_USER", "dbmasteruser")  # Changed from AWS_POSTGRES_USER
-    POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")      # Changed from AWS_POSTGRES_PASSWORD
-    POSTGRES_HOST = os.getenv("POSTGRES_HOST", "")             # Changed from AWS_POSTGRES_HOST
-    POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")         # Changed from AWS_POSTGRES_PORT
-    POSTGRES_DB = os.getenv("POSTGRES_DB", "recordings")       # Changed from AWS_POSTGRES_DB
+    POSTGRES_USER = os.getenv("POSTGRES_USER", "dbmasteruser")
+    POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
+    POSTGRES_HOST = os.getenv("POSTGRES_HOST", "")
+    POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
+    POSTGRES_DB = os.getenv("POSTGRES_DB", "recordings")
     
     # Escape special characters in password
     escaped_password = quote_plus(POSTGRES_PASSWORD)
