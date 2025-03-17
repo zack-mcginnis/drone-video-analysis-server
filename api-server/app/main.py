@@ -64,22 +64,25 @@ def health_check():
     return {"status": "healthy"}
 
 @app.get("/videos/{video_id}/stream")
-async def get_video_stream_url(video_id: str):
-    """
-    Generate a CloudFront URL for streaming the video
-    """
-    # Check if video exists
+def get_video_stream(video_id: str):
+    # Check if the video exists in S3
     s3_client = boto3.client('s3')
     try:
         s3_client.head_object(
-            Bucket='your-drone-video-storage',
+            Bucket=os.getenv("S3_BUCKET"),
             Key=f'videos/{video_id}/playlist.m3u8'
         )
     except:
         raise HTTPException(status_code=404, detail="Video not found")
     
-    # Generate CloudFront URL
-    cloudfront_domain = "your-distribution-id.cloudfront.net"
-    stream_url = f"https://{cloudfront_domain}/videos/{video_id}/playlist.m3u8"
+    # Generate CloudFront URL if available, otherwise use S3 URL
+    if os.getenv("CLOUDFRONT_DOMAIN"):
+        cloudfront_domain = os.getenv("CLOUDFRONT_DOMAIN")
+        stream_url = f"https://{cloudfront_domain}/videos/{video_id}/playlist.m3u8"
+    else:
+        # Fallback to direct S3 URL
+        region = os.getenv("AWS_REGION", "us-east-1")
+        bucket = os.getenv("S3_BUCKET")
+        stream_url = f"https://{bucket}.s3.{region}.amazonaws.com/videos/{video_id}/playlist.m3u8"
     
     return {"stream_url": stream_url} 

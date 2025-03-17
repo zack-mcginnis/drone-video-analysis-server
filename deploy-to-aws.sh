@@ -96,7 +96,7 @@ rm project.tar.gz
 
 # SSH into the server and deploy the Docker containers
 echo "Deploying Docker containers on the server..."
-ssh -i "$SSH_KEY_PATH" "$SSH_USER@$PUBLIC_IP" << 'EOF'
+ssh -i "$SSH_KEY_PATH" "$SSH_USER@$PUBLIC_IP" << EOF
     # Extract project files
     echo "Extracting project files..."
     mkdir -p ~/drone-rtmp-project
@@ -126,21 +126,27 @@ ssh -i "$SSH_KEY_PATH" "$SSH_USER@$PUBLIC_IP" << 'EOF'
     
     # Deploy API server with environment variables from the .env file
     echo "Deploying API server..."
+    echo "Debug: Environment variables being passed:"
+    echo "POSTGRES_HOST=${POSTGRES_HOST}"
+    echo "POSTGRES_USER=${POSTGRES_USER}"
+    echo "POSTGRES_PORT=${POSTGRES_PORT}"
+    echo "POSTGRES_DB=${POSTGRES_DB}"
     sudo docker run -d --restart always \
         --name api-server-container \
         --network drone-network \
         -p 8000:8000 \
         -e ENVIRONMENT=aws \
-        -e AWS_POSTGRES_HOST=ls-133099678d75bb2fede9f17404c4d2cb961b3090.ccl6i8m202bm.us-east-1.rds.amazonaws.com \
-        -e AWS_POSTGRES_PORT=5432 \
-        -e AWS_POSTGRES_DB=recordings \
-        -e AWS_POSTGRES_USER=dbmasteruser \
-        -e AWS_POSTGRES_PASSWORD=',>onBRIM9=7io%&%}p~n<hf6HzIL4A>w' \
-        -e AWS_REGION=us-east-1 \
-        -e S3_BUCKET=bucket-d8mdwm \
-        -e AWS_ACCESS_KEY_ID=AKIARWPFIU4PYNWUZF7X \
-        -e AWS_SECRET_ACCESS_KEY='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' \
-        -e USE_LIGHTSAIL_BUCKET=true \
+        -e AWS_REGION="${AWS_REGION}" \
+        -e S3_BUCKET="${S3_BUCKET}" \
+        -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
+        -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
+        -e USE_LIGHTSAIL_BUCKET="${USE_LIGHTSAIL_BUCKET}" \
+        -e CLOUDFRONT_DOMAIN="${CLOUDFRONT_DOMAIN}" \
+        -e POSTGRES_HOST="${POSTGRES_HOST}" \
+        -e POSTGRES_PORT="${POSTGRES_PORT}" \
+        -e POSTGRES_DB="${POSTGRES_DB}" \
+        -e POSTGRES_USER="${POSTGRES_USER}" \
+        -e POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
         api-server
     
     # Wait a moment for the container to start

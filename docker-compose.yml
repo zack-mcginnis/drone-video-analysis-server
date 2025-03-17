@@ -2,22 +2,21 @@ version: '3'
 
 services:
   rtmp-server:
-    build: ./rtmp-server
+    build:
+      context: ./rtmp-server
     ports:
-      - "1935:1935"  # RTMP port
-      - "8080:8080"  # HLS port
+      - "1935:1935"  # RTMP
+      - "8080:8080"  # HLS
     volumes:
-      - ./rtmp-server/nginx.conf:/etc/nginx/nginx.conf
-      - ./recordings:/recordings
+      - recordings:/recordings
     environment:
-      - ENVIRONMENT=${ENVIRONMENT:-local}
-      - AWS_REGION=${AWS_REGION:-us-west-2}
-      - S3_BUCKET=${S3_BUCKET:-drone-video-recordings}
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
-      - API_SERVER=http://api-server:8000
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - S3_BUCKET=${S3_BUCKET:-bucket-d8mdwm}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - API_SERVER_URL=http://api-server:8000
     networks:
-      - drone-network
+      - app-network
 
   mock-video-source:
     build: ./mock-video-source
@@ -27,47 +26,51 @@ services:
       - drone-network
 
   api-server:
-    build: ./api-server
+    build:
+      context: ./api-server
     ports:
-      - "8000:8000"  # API port
+      - "8000:8000"
     environment:
       - ENVIRONMENT=${ENVIRONMENT:-local}
-      # PostgreSQL configuration - will be set based on ENVIRONMENT
-      - POSTGRES_DB=${LOCAL_POSTGRES_DB:-recordings}
-      - POSTGRES_USER=${LOCAL_POSTGRES_USER:-postgres}
-      - POSTGRES_PASSWORD=${LOCAL_POSTGRES_PASSWORD:-postgres}
-      # AWS PostgreSQL configuration
-      - AWS_POSTGRES_HOST=${AWS_POSTGRES_HOST:-}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - S3_BUCKET=${S3_BUCKET:-bucket-d8mdwm}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - USE_LIGHTSAIL_BUCKET=${USE_LIGHTSAIL_BUCKET:-true}
+      - CLOUDFRONT_DOMAIN=${CLOUDFRONT_DOMAIN}
+      - AWS_POSTGRES_HOST=${AWS_POSTGRES_HOST}
       - AWS_POSTGRES_PORT=${AWS_POSTGRES_PORT:-5432}
       - AWS_POSTGRES_DB=${AWS_POSTGRES_DB:-recordings}
-      - AWS_POSTGRES_USER=${AWS_POSTGRES_USER:-}
-      - AWS_POSTGRES_PASSWORD=${AWS_POSTGRES_PASSWORD:-}
-      # AWS configuration
-      - AWS_REGION=${AWS_REGION:-us-west-2}
-      - S3_BUCKET=${S3_BUCKET:-drone-video-recordings}
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_POSTGRES_USER=${AWS_POSTGRES_USER}
+      - AWS_POSTGRES_PASSWORD=${AWS_POSTGRES_PASSWORD}
     depends_on:
       - db
     networks:
-      - drone-network
+      - app-network
+    volumes:
+      - ./api-server/app:/app/app
+      - ./api-server/alembic:/app/alembic
+      - ./api-server/scripts:/app/scripts
 
   db:
     image: postgres:13
     ports:
       - "5432:5432"
     environment:
-      - POSTGRES_DB=${LOCAL_POSTGRES_DB:-recordings}
       - POSTGRES_USER=${LOCAL_POSTGRES_USER:-postgres}
       - POSTGRES_PASSWORD=${LOCAL_POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${LOCAL_POSTGRES_DB:-recordings}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
-      - drone-network
+      - app-network
 
 volumes:
+  recordings:
   postgres_data:
 
 networks:
+  app-network:
+    driver: bridge
   drone-network:
     driver: bridge 

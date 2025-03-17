@@ -51,3 +51,10 @@ recordings/
 # Alembic
 alembic/versions/*.py
 !alembic/versions/__init__.py
+
+# Deployment scripts with credentials
+deploy-to-aws-with-creds.sh
+
+# Backup files that might contain credentials
+*.bak
+*-backup.*
