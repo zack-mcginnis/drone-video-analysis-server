@@ -6,6 +6,12 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+# Install AWS CLI
+RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
+    unzip awscliv2.zip && \
+    ./aws/install && \
+    rm -rf aws awscliv2.zip
+
 # Create directories for recordings
 RUN mkdir -p /recordings && \
     chmod 777 /recordings && \
@@ -15,10 +21,14 @@ RUN mkdir -p /recordings && \
 COPY nginx.conf /etc/nginx/nginx.conf
 COPY start.sh /start.sh
 COPY record_done.sh /usr/local/bin/record_done.sh
+COPY record_done_wrapper.sh /usr/local/bin/record_done_wrapper.sh
+COPY nginx_exec_wrapper.sh /usr/local/bin/nginx_exec_wrapper.sh
 
 # Make scripts executable
 RUN chmod +x /start.sh && \
-    chmod +x /usr/local/bin/record_done.sh
+    chmod +x /usr/local/bin/record_done.sh && \
+    chmod +x /usr/local/bin/record_done_wrapper.sh && \
+    chmod +x /usr/local/bin/nginx_exec_wrapper.sh
 
 # The environment variables are now passed at runtime via docker-compose.yml
 # or the docker run command, so we don't need to set defaults here

@@ -13,9 +13,20 @@ services:
       - ./.env
     environment:
       - ENVIRONMENT=local
+      - USE_LIGHTSAIL_BUCKET=true
       - API_SERVER_URL=http://api-server:8000
+      - AWS_REGION=${AWS_REGION}
+      - S3_BUCKET=${S3_BUCKET}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - DEBUG=true
     networks:
       - app-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   mock-video-source:
     build: ./mock-video-source
@@ -33,8 +44,8 @@ services:
       - ./.env
     environment:
       - ENVIRONMENT=local
-      - POSTGRES_HOST=db
-      - POSTGRES_PORT=5432
+      - POSTGRES_HOST=${LOCAL_POSTGRES_HOST}
+      - POSTGRES_PORT=${LOCAL_POSTGRES_PORT}
       - POSTGRES_DB=${LOCAL_POSTGRES_DB:-recordings}
       - POSTGRES_USER=${LOCAL_POSTGRES_USER:-postgres}
       - POSTGRES_PASSWORD=${LOCAL_POSTGRES_PASSWORD:-postgres}

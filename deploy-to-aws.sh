@@ -24,10 +24,6 @@ if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
     fi
 fi
 
-# Set default values for AWS region and S3 bucket if not provided
-AWS_REGION=${AWS_REGION:-"us-west-2"}
-S3_BUCKET=${S3_BUCKET:-"drone-video-recordings"}
-
 # Check if the SSH key has the correct permissions
 if [ "$(stat -c %a "$SSH_KEY_PATH")" != "600" ]; then
     echo "Warning: SSH key file has incorrect permissions. Setting to 600..."
@@ -126,11 +122,6 @@ ssh -i "$SSH_KEY_PATH" "$SSH_USER@$PUBLIC_IP" << EOF
     
     # Deploy API server with environment variables from the .env file
     echo "Deploying API server..."
-    echo "Debug: Environment variables being passed:"
-    echo "POSTGRES_HOST=${POSTGRES_HOST}"
-    echo "POSTGRES_USER=${POSTGRES_USER}"
-    echo "POSTGRES_PORT=${POSTGRES_PORT}"
-    echo "POSTGRES_DB=${POSTGRES_DB}"
     sudo docker run -d --restart always \
         --name api-server-container \
         --network drone-network \
@@ -169,7 +160,8 @@ ssh -i "$SSH_KEY_PATH" "$SSH_USER@$PUBLIC_IP" << EOF
         -e S3_BUCKET=$S3_BUCKET \
         -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID \
         -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
-        -e API_SERVER=http://api-server-container:8000 \
+        -e USE_LIGHTSAIL_BUCKET=$USE_LIGHTSAIL_BUCKET \
+        -e API_SERVER_URL=http://api-server-container:8000 \
         rtmp-server
     
     # Check if containers are running
