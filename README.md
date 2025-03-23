@@ -118,3 +118,21 @@ This project uses a single `.env` file at the root directory for all environment
 3. **For local development**, the default values should work out of the box.
 
 4. **For AWS deployment**, you'll need to fill in the AWS-specific variables before running the deploy script. 
+
+## Data Storage
+
+This project maintains full control over video data without exposing anything to DJI servers by using the following storage strategy:
+
+### Local Development Environment
+- Video metadata is stored in a local PostgreSQL database
+- Video files are saved in a local `/recordings` directory on your machine
+
+### AWS Production Environment
+- Video metadata is stored in a deployed PostgreSQL database in AWS
+- Video files are stored in an AWS S3 bucket
+
+This approach provides:
+- Complete data sovereignty
+- No dependency on third-party cloud services for video storage
+- Flexible deployment options with consistent architecture
+- Secure and private data management 
