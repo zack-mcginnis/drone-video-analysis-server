@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.cursorrules
+
+# Logs
+logs/
+*.log
+
+# Environment variables
+.env
+
+# Docker
+.dockerignore
+
+# Recordings
+recordings/
+
+# Database
+*.db
+*.sqlite3
+
+# Alembic
+alembic/versions/*.py
+!alembic/versions/__init__.py
+
+# Deployment scripts with credentials
+deploy-to-aws-with-creds.sh
+
+# Backup files that might contain credentials
+*.bak
+*-backup.*

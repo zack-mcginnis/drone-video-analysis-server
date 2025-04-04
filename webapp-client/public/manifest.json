@@ -1,0 +1,8 @@
+{
+  "short_name": "Drone Stream",
+  "name": "DJI Drone Video Stream",
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#000000",
+  "background_color": "#121212"
+} 
