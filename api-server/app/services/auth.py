@@ -72,53 +72,11 @@ class AuthService:
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-    async def get_management_token(self) -> str:
-        """Get an access token for the Auth0 Management API."""
-        if not self._management_token:
-            # Log the configuration (without secrets)
-            logger.info(f"Attempting to get management token from Auth0 domain: {self.domain}")
-            logger.info(f"Management API Client ID: {self.client_id[:6]}..." if self.client_id else "Client ID not set")
-            
-            if not self.client_id or not self.client_secret:
-                logger.error("Auth0 Management API credentials are not properly configured")
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Auth0 Management API configuration is missing"
-                )
-
-            async with httpx.AsyncClient() as client:
-                token_url = f"https://{self.domain}/oauth/token"
-                payload = {
-                    "client_id": self.client_id,
-                    "client_secret": self.client_secret,
-                    "audience": f"https://{self.domain}/api/v2/",
-                    "grant_type": "client_credentials"
-                }
-
-                try:
-                    response = await client.post(token_url, json=payload)
-                    if response.status_code != 200:
-                        logger.error(f"Failed to get management token. Status: {response.status_code}")
-                        logger.error(f"Response: {response.text}")
-                        raise HTTPException(
-                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                            detail=f"Error authenticating with Auth0 Management API: {response.text}"
-                        )
-                    self._management_token = response.json()["access_token"]
-                except Exception as e:
-                    logger.error(f"Exception while getting management token: {str(e)}")
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail="Failed to connect to Auth0 Management API"
-                    )
-        return self._management_token
-
-    async def get_user_email_from_auth0(self, user_id: str) -> str:
+    async def get_user_email_from_auth0(self, user_id: str, token: str) -> str:
         """Fetch user email from Auth0 Management API."""
-        token = await self.get_management_token()
         async with httpx.AsyncClient() as client:
             response = await client.get(
-                f"https://{self.domain}/api/v2/users/{user_id}",
+                f"https://{self.domain}/userinfo",
                 headers={"Authorization": f"Bearer {token}"}
             )
             if response.status_code != 200:
@@ -138,18 +96,6 @@ class AuthService:
         token = credentials.credentials
         payload = await self.verify_token(token)
         
-        # Debug information
-        print("\nAuth0 Token Debug Information:")
-        print("------------------------")
-        print("Available claims in token payload:")
-        for claim, value in payload.items():
-            # Mask sensitive values
-            if claim in ['sub', 'email']:
-                print(f"  {claim}: [MASKED]")
-            else:
-                print(f"  {claim}: {value}")
-        print("------------------------\n")
-        
         # Get user ID from token
         auth0_id = payload.get("sub")
         if not auth0_id:
@@ -166,7 +112,7 @@ class AuthService:
         if not email:
             logger.info(f"Email not found in token, attempting to fetch from Auth0 Management API for user: {auth0_id}")
             try:
-                email = await self.get_user_email_from_auth0(auth0_id)
+                email = await self.get_user_email_from_auth0(auth0_id, token)
             except Exception as e:
                 logger.error(f"Error fetching user email from Auth0 Management API: {str(e)}")
                 # Fall back to using the token's sub claim as the email
