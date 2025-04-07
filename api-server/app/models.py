@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text, BigInteger, JSON
+from sqlalchemy import Column, Integer, String, DateTime, Text, BigInteger, JSON, Boolean
 from sqlalchemy.sql import func
 from .database import Base
 
@@ -14,4 +14,14 @@ class Recording(Base):
     file_size = Column(BigInteger, nullable=True)
     duration = Column(Integer, nullable=True)
     environment = Column(String(50), nullable=False)
-    recording_metadata = Column(JSON, nullable=True) 
+    recording_metadata = Column(JSON, nullable=True)
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(255), unique=True, index=True, nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    auth0_id = Column(String(255), unique=True, index=True) 
