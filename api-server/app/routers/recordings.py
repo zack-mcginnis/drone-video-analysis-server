@@ -13,9 +13,11 @@ import tempfile
 from pathlib import Path
 import logging
 import requests
+from app.models import User
 
 from ..utils.video import process_video_for_streaming, get_video_info
 from ..utils.s3 import get_s3_client, generate_presigned_url, download_from_s3
+from app.services.auth import auth_service
 
 load_dotenv()
 
@@ -35,7 +37,8 @@ def read_recordings(
     skip: int = 0, 
     limit: int = 100, 
     stream_name: Optional[str] = None,
-    db: Session = Depends(database.get_db)
+    db: Session = Depends(database.get_db),
+    current_user: User = Depends(auth_service.get_current_user)
 ):
     recordings = crud.get_recordings(db, skip=skip, limit=limit, stream_name=stream_name)
     return {"recordings": recordings, "count": len(recordings)}

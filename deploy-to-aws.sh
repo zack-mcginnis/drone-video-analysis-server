@@ -178,6 +178,10 @@ ERROR_OUTPUT=$(ssh -i "$API_SSH_KEY_PATH" -o ConnectTimeout=10 "$SSH_USER@$API_P
         -e POSTGRES_DB="${POSTGRES_DB}" \
         -e POSTGRES_USER="${POSTGRES_USER}" \
         -e POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
+        -e AUTH0_DOMAIN="${AUTH0_DOMAIN}" \
+        -e AUTH0_AUDIENCE="${AUTH0_AUDIENCE}" \
+        -e AUTH0_CLIENT_ID="${AUTH0_CLIENT_ID}" \
+        -e AUTH0_CLIENT_SECRET="${AUTH0_CLIENT_SECRET}" \
         -e RTMP_SERVER_URL="http://${RTMP_PUBLIC_IP}:8080" \
         api-server || {
             echo "Failed to start API server container"
