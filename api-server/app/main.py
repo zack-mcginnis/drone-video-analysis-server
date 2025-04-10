@@ -1,38 +1,85 @@
 import subprocess
 import os
+import time
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from .routers import recordings
+from .routers import recordings, users, stream
 from . import models
-from .database import engine
+from .database import engine, SQLALCHEMY_DATABASE_URL
 import boto3
 import logging
+import asyncio
+from contextlib import asynccontextmanager
+from alembic.config import Config
+from alembic import command
+from alembic.runtime import migration
+from alembic.script import ScriptDirectory
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Run migrations if in AWS environment
-if os.getenv("ENVIRONMENT", "local").lower() == "aws":
+def wait_for_db(max_retries=30, retry_interval=1):
+    """Wait for the database to be ready with exponential backoff"""
+    retries = 0
+    while retries < max_retries:
+        try:
+            # Try to establish a connection and run a simple query
+            with engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+                logger.info("Successfully connected to the database")
+                return True
+        except OperationalError as e:
+            wait_time = retry_interval * (2 ** retries)  # Exponential backoff
+            wait_time = min(wait_time, 10)  # Cap at 10 seconds
+            logger.warning(f"Database not ready yet (attempt {retries + 1}/{max_retries}). Retrying in {wait_time} seconds...")
+            time.sleep(wait_time)
+            retries += 1
+    
+    raise Exception("Could not connect to the database after maximum retries")
+
+def run_migrations_sync():
+    """Run database migrations using Alembic"""
     try:
         logger.info("Running database migrations...")
-        subprocess.run(["alembic", "upgrade", "head"], check=True)
-        logger.info("Migrations completed successfully.")
-    except subprocess.CalledProcessError as e:
+        # Create Alembic configuration
+        alembic_cfg = Config("alembic.ini")
+        
+        # Get the migration script directory
+        script = ScriptDirectory.from_config(alembic_cfg)
+        
+        # Get the current head revision
+        head_revision = script.get_current_head()
+        
+        # Run the migration
+        with engine.begin() as connection:
+            alembic_cfg.attributes['connection'] = connection
+            command.upgrade(alembic_cfg, "head")
+            
+        logger.info(f"Migrations completed successfully. Head revision: {head_revision}")
+    except Exception as e:
         logger.error(f"Error running migrations: {e}")
-        # Continue anyway, as the app might be able to function with existing tables
+        raise
 
-# Create database tables (fallback if migrations fail)
-try:
-    models.Base.metadata.create_all(bind=engine)
-except Exception as e:
-    logger.error(f"Error creating database tables: {e}")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Wait for database to be ready and run migrations in a separate thread
+    try:
+        await asyncio.get_event_loop().run_in_executor(None, wait_for_db)
+        await asyncio.get_event_loop().run_in_executor(None, run_migrations_sync)
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+        raise
+    yield
 
 # Create FastAPI app
 app = FastAPI(
     title="RTMP Recording API",
     description="API for managing RTMP recordings",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # Configure CORS
@@ -48,6 +95,8 @@ if os.getenv("ENVIRONMENT", "local").lower() == "local":
 
 # Include routers
 app.include_router(recordings.router)
+app.include_router(users.router)
+app.include_router(stream.router)
 
 @app.get("/")
 def read_root():

@@ -40,36 +40,64 @@ def read_recordings(
     db: Session = Depends(database.get_db),
     current_user: User = Depends(auth_service.get_current_user)
 ):
-    recordings = crud.get_recordings(db, skip=skip, limit=limit, stream_name=stream_name)
+    recordings = crud.get_recordings(db, user_id=current_user.id, skip=skip, limit=limit, stream_name=stream_name)
     return {"recordings": recordings, "count": len(recordings)}
 
 @router.get("/{recording_id}", response_model=schemas.Recording)
-def read_recording(recording_id: int, db: Session = Depends(database.get_db)):
-    db_recording = crud.get_recording(db, recording_id=recording_id)
+def read_recording(
+    recording_id: int, 
+    db: Session = Depends(database.get_db),
+    current_user: User = Depends(auth_service.get_current_user)
+):
+    db_recording = crud.get_recording(db, recording_id=recording_id, user_id=current_user.id)
     if db_recording is None:
         raise HTTPException(status_code=404, detail="Recording not found")
     return db_recording
 
 @router.post("/", response_model=schemas.Recording)
-def create_recording(recording: schemas.RecordingCreate, db: Session = Depends(database.get_db)):
+def create_recording(
+    recording: schemas.RecordingCreate,
+    db: Session = Depends(database.get_db),
+    current_user: User = Depends(auth_service.get_current_user)
+):
+    # Set the user_id to the current user's ID
+    recording.user_id = current_user.id
+    print("Creating recording")
     return crud.create_recording(db=db, recording=recording)
 
 @router.put("/{recording_id}", response_model=schemas.Recording)
-def update_recording(recording_id: int, recording: schemas.RecordingCreate, db: Session = Depends(database.get_db)):
-    db_recording = crud.update_recording(db, recording_id=recording_id, recording=recording)
+def update_recording(
+    recording_id: int, 
+    recording: schemas.RecordingCreate,
+    db: Session = Depends(database.get_db),
+    current_user: User = Depends(auth_service.get_current_user)
+):
+    # Ensure the recording belongs to the current user
+    db_recording = crud.get_recording(db, recording_id=recording_id, user_id=current_user.id)
     if db_recording is None:
         raise HTTPException(status_code=404, detail="Recording not found")
-    return db_recording
+    
+    # Update the recording
+    return crud.update_recording(db, recording_id=recording_id, recording=recording, user_id=current_user.id)
 
 @router.delete("/{recording_id}")
-def delete_recording(recording_id: int, db: Session = Depends(database.get_db)):
-    success = crud.delete_recording(db, recording_id=recording_id)
+def delete_recording(
+    recording_id: int,
+    db: Session = Depends(database.get_db),
+    current_user: User = Depends(auth_service.get_current_user)
+):
+    success = crud.delete_recording(db, recording_id=recording_id, user_id=current_user.id)
     if not success:
         raise HTTPException(status_code=404, detail="Recording not found")
     return {"detail": "Recording deleted successfully"}
 
 @router.get("/stream/{recording_id}")
-async def stream_recording(recording_id: int, request: Request, db: Session = Depends(database.get_db)) -> Dict[str, Any]:
+async def stream_recording(
+    recording_id: int, 
+    request: Request, 
+    db: Session = Depends(database.get_db),
+    current_user: User = Depends(auth_service.get_current_user)
+) -> Dict[str, Any]:
     """
     Stream a recording using HLS.
     
@@ -83,7 +111,7 @@ async def stream_recording(recording_id: int, request: Request, db: Session = De
     """
     try:
         # Get recording from database
-        db_recording = crud.get_recording(db, recording_id=recording_id)
+        db_recording = crud.get_recording(db, recording_id=recording_id, user_id=current_user.id)
         if db_recording is None:
             raise HTTPException(status_code=404, detail="Recording not found")
 
@@ -194,7 +222,11 @@ async def get_hls_file(recording_id: str, file_name: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/{recording_id}/info")
-async def get_recording_info(recording_id: str) -> Dict[str, Any]:
+async def get_recording_info(
+    recording_id: str,
+    db: Session = Depends(database.get_db),
+    current_user: User = Depends(auth_service.get_current_user)
+) -> Dict[str, Any]:
     """
     Get information about a recording.
     
@@ -205,6 +237,11 @@ async def get_recording_info(recording_id: str) -> Dict[str, Any]:
         Dictionary containing recording information
     """
     try:
+        # Get recording from database
+        db_recording = crud.get_recording(db, recording_id=int(recording_id), user_id=current_user.id)
+        if db_recording is None:
+            raise HTTPException(status_code=404, detail="Recording not found")
+            
         recording_dir = os.path.join(RECORDINGS_DIR, f"drone_stream_{recording_id}")
         mp4_file = os.path.join(recording_dir, f"{recording_id}.mp4")
         
@@ -296,10 +333,14 @@ def convert_to_streaming_formats(input_path, video_id):
     
     return output_dir 
 
-@router.post("/{recording_id}/process")
-async def process_recording(recording_id: int, db: Session = Depends(database.get_db)):
+@router.post("/", response_model=schemas.Recording)
+def create_recording(
+    recording: schemas.RecordingCreate,
+    db: Session = Depends(database.get_db),
+    current_user: User = Depends(auth_service.get_current_user)
+):
     """Process a recording to create HLS streaming format"""
-    db_recording = crud.get_recording(db, recording_id=recording_id)
+    db_recording = crud.get_recording(db, recording_id=recording.id, user_id=current_user.id)
     if db_recording is None:
         raise HTTPException(status_code=404, detail="Recording not found")
     
@@ -315,7 +356,7 @@ async def process_recording(recording_id: int, db: Session = Depends(database.ge
         
         # Process the file
         try:
-            output_dir = convert_to_streaming_formats(file_path, recording_id)
+            output_dir = convert_to_streaming_formats(file_path, recording.id)
             
             # Update recording metadata
             metadata = db_recording.recording_metadata or {}
@@ -324,7 +365,7 @@ async def process_recording(recording_id: int, db: Session = Depends(database.ge
             metadata["processed_at"] = datetime.now().isoformat()
             
             # Update the recording in the database
-            db_recording = crud.update_recording_metadata(db, recording_id, metadata)
+            db_recording = crud.update_recording_metadata(db, recording.id, metadata)
             
             return {"status": "success", "message": "Recording processed successfully", "output_dir": output_dir}
         except Exception as e:
@@ -430,9 +471,13 @@ async def get_debug_video_player(recording_id: int, db: Session = Depends(databa
     )
 
 @router.get("/{recording_id}/playback-info")
-async def get_recording_playback_info(recording_id: int, db: Session = Depends(database.get_db)):
+async def get_recording_playback_info(
+    recording_id: int,
+    db: Session = Depends(database.get_db),
+    current_user: User = Depends(auth_service.get_current_user)
+):
     """Get playback information for a recording"""
-    db_recording = crud.get_recording(db, recording_id=recording_id)
+    db_recording = crud.get_recording(db, recording_id=recording_id, user_id=current_user.id)
     if db_recording is None:
         raise HTTPException(status_code=404, detail="Recording not found")
     
@@ -475,9 +520,12 @@ async def get_recording_playback_info(recording_id: int, db: Session = Depends(d
     return response 
 
 @router.get("/streams")
-async def get_streams(db: Session = Depends(database.get_db)):
-    """Get a list of unique stream IDs"""
-    recordings = crud.get_recordings(db)
+async def get_streams(
+    db: Session = Depends(database.get_db),
+    current_user: User = Depends(auth_service.get_current_user)
+):
+    """Get a list of unique stream IDs for the current user"""
+    recordings = crud.get_recordings(db, user_id=current_user.id)
     
     # Extract unique stream IDs from recording metadata
     streams = {}
@@ -511,9 +559,13 @@ async def get_streams(db: Session = Depends(database.get_db)):
     return {"streams": list(streams.values())}
 
 @router.get("/streams/{stream_id}/recordings")
-async def get_stream_recordings(stream_id: str, db: Session = Depends(database.get_db)):
-    """Get all recordings for a specific stream ID"""
-    recordings = crud.get_recordings(db)
+async def get_stream_recordings(
+    stream_id: str,
+    db: Session = Depends(database.get_db),
+    current_user: User = Depends(auth_service.get_current_user)
+):
+    """Get all recordings for a specific stream ID for the current user"""
+    recordings = crud.get_recordings(db, user_id=current_user.id)
     
     # Filter recordings by stream ID
     stream_recordings = []
@@ -526,4 +578,33 @@ async def get_stream_recordings(stream_id: str, db: Session = Depends(database.g
             # Fallback to stream name if no stream_id
             stream_recordings.append(recording)
     
-    return {"recordings": [schemas.Recording.from_orm(r) for r in stream_recordings]} 
+    return {"recordings": [schemas.Recording.from_orm(r) for r in stream_recordings]}
+
+@router.post("/rtmp/{stream_key}", response_model=schemas.Recording)
+def create_recording_from_rtmp(
+    stream_key: str,
+    recording: schemas.RecordingCreate,
+    db: Session = Depends(database.get_db)
+):
+    """
+    Special endpoint for RTMP server to create recordings without authentication.
+    This endpoint should only be accessible from the RTMP server.
+    """
+    try:
+        # Find user by stream key
+        user = db.query(User).filter(
+            User.stream_keys.contains([stream_key])
+        ).first()
+        
+        if not user:
+            logger.error(f"No user found for stream key: {stream_key}")
+            raise HTTPException(status_code=404, detail="Invalid stream key")
+        
+        # Set the user_id in the recording
+        recording.user_id = user.id
+        
+        logger.info(f"Creating recording for user {user.id} with stream key {stream_key}")
+        return crud.create_recording(db=db, recording=recording)
+    except Exception as e:
+        logger.error(f"Error creating recording from RTMP: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) 

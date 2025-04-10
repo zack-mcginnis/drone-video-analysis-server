@@ -10,6 +10,7 @@ class RecordingBase(BaseModel):
     duration: Optional[int] = None
     environment: str
     recording_metadata: Optional[Dict[str, Any]] = None
+    user_id: int
 
 class RecordingCreate(RecordingBase):
     pass

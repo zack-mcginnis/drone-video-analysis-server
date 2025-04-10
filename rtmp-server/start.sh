@@ -63,5 +63,5 @@ else
     echo "Running in AWS environment, skipping recordings cleanup."
 fi
 
-# Start nginx
-exec nginx -g "daemon off;" 
+# Start nginx with correct path
+exec /usr/local/nginx/sbin/nginx -g "daemon off;" -c /usr/local/nginx/conf/nginx.conf 

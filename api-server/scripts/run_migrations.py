@@ -13,9 +13,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Load environment variables
 load_dotenv()
 
-# Set environment to AWS for migrations
-os.environ["ENVIRONMENT"] = "aws"
-
 # Ensure the versions directory exists
 versions_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "alembic", "versions")
 if not os.path.exists(versions_dir):
@@ -75,21 +72,5 @@ try:
         sys.exit(0)
     else:
         print(f"Alembic migrations failed: {result.stderr}")
-        print("Falling back to SQLAlchemy table creation...")
 except Exception as e:
     print(f"Error running Alembic: {e}")
-    print("Falling back to SQLAlchemy table creation...")
-
-# Fall back to SQLAlchemy table creation
-try:
-    print("Creating tables using SQLAlchemy...")
-    # Import here to ensure the app module can be found
-    from app.models import Base
-    from app.database import engine
-    
-    Base.metadata.create_all(bind=engine)
-    print("Database tables created successfully using SQLAlchemy.")
-    sys.exit(0)
-except Exception as e:
-    print(f"Error creating tables with SQLAlchemy: {e}")
-    sys.exit(1) 

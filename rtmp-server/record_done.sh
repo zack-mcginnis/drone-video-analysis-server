@@ -6,9 +6,13 @@ RECORDING_PATH="$1"
 STREAM_NAME="$2"
 BASENAME="$3"
 
+# Extract stream key from stream name
+STREAM_KEY=$(echo "$STREAM_NAME" | cut -d'/' -f2)
+
 # Initial environment variable logging
 echo "$(date): Script started with environment settings:" >> /var/log/nginx/recording.log
 echo "  ENVIRONMENT=${ENVIRONMENT:-'local'}" >> /var/log/nginx/recording.log
+echo "  STREAM_KEY=$STREAM_KEY" >> /var/log/nginx/recording.log
 
 # Only log AWS-related variables if we're in AWS environment
 if [ "${ENVIRONMENT:-local}" = "aws" ]; then
@@ -183,20 +187,27 @@ send_recording_metadata() {
 EOF
 )
     
-    # Send to API server
+    # Send to API server with stream key in URL
     API_SERVER_URL=${API_SERVER_URL:-"http://api-server:8000"}
     
-    CURL_RESPONSE=$(curl -s -X POST \
+    # Make API request with better error handling
+    CURL_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
         -H "Content-Type: application/json" \
         -d "$JSON_PAYLOAD" \
-        "$API_SERVER_URL/recordings/" 2>&1)
-    CURL_STATUS=$?
+        "$API_SERVER_URL/recordings/rtmp/$STREAM_KEY" 2>&1)
+    
+    # Extract HTTP status code and response body
+    HTTP_STATUS=$(echo "$CURL_RESPONSE" | tail -n1)
+    RESPONSE_BODY=$(echo "$CURL_RESPONSE" | sed '$d')
     
     # Check if API call was successful
-    if [ $CURL_STATUS -eq 0 ]; then
-        echo "$(date): Metadata sent to API server" >> /var/log/nginx/recording.log
+    if [ $? -eq 0 ] && [ "$HTTP_STATUS" -eq 200 ]; then
+        echo "$(date): Metadata sent to API server successfully" >> /var/log/nginx/recording.log
+        echo "$(date): API Response: $RESPONSE_BODY" >> /var/log/nginx/recording.log
     else
         echo "$(date): Failed to send metadata to API server" >> /var/log/nginx/recording.log
+        echo "$(date): HTTP Status: $HTTP_STATUS" >> /var/log/nginx/recording.log
+        echo "$(date): Response: $RESPONSE_BODY" >> /var/log/nginx/recording.log
     fi
 }
 

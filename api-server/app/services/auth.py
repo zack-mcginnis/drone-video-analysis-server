@@ -93,6 +93,8 @@ class AuthService:
         credentials: HTTPAuthorizationCredentials = Depends(security),
         db: Session = Depends(get_db)
     ) -> User:
+        
+        print("Getting current user")
         token = credentials.credentials
         payload = await self.verify_token(token)
         
