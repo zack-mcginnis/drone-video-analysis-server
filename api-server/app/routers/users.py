@@ -27,6 +27,7 @@ class UserResponse(BaseModel):
     email: str
     auth0_id: str
     is_active: bool
+    is_admin: bool
     created_at: datetime
     devices: List[DeviceResponse]
 
@@ -46,9 +47,9 @@ router = APIRouter(
 @router.post("/stream-keys", response_model=List[str])
 async def create_stream_key(
     db: Session = Depends(database.get_db),
-    current_user: models.User = Depends(auth_service.get_current_user)
+    current_user: models.User = Depends(auth_service.get_admin_user)
 ):
-    """Create a new stream key for the current user."""
+    """Create a new stream key for the current user. Admin only."""
     # Generate a new stream key
     stream_key = generate_stream_key()
     
@@ -75,9 +76,9 @@ async def get_stream_keys(
 async def delete_stream_key(
     stream_key: str,
     db: Session = Depends(database.get_db),
-    current_user: models.User = Depends(auth_service.get_current_user)
+    current_user: models.User = Depends(auth_service.get_admin_user)
 ):
-    """Delete a stream key for the current user."""
+    """Delete a stream key for the current user. Admin only."""
     if not validate_stream_key(stream_key):
         raise HTTPException(status_code=400, detail="Invalid stream key format")
     

@@ -144,4 +144,20 @@ class AuthService:
             
         return user
 
+    async def get_admin_user(
+        self,
+        credentials: HTTPAuthorizationCredentials = Depends(security),
+        db: Session = Depends(get_db)
+    ) -> User:
+        """Get current user and verify they are an admin."""
+        user = await self.get_current_user(credentials, db)
+        
+        if not user.is_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin privileges required for this action"
+            )
+            
+        return user
+
 auth_service = AuthService() 

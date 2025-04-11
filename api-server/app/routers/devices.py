@@ -24,9 +24,9 @@ def generate_stream_key(length: int = 8) -> str:
 async def create_device(
     device: DeviceCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(auth_service.get_current_user)
+    current_user: User = Depends(auth_service.get_admin_user)
 ):
-    """Create a new device for the authenticated user."""
+    """Create a new device. Admin only."""
     db_device = Device(
         name=device.name,
         stream_key=generate_stream_key(),
@@ -115,13 +115,13 @@ async def update_device(
             detail="Error updating device. Please try again."
         )
 
-@router.delete("/{device_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{device_id}")
 async def delete_device(
     device_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(auth_service.get_current_user)
+    current_user: User = Depends(auth_service.get_admin_user)
 ):
-    """Delete a device."""
+    """Delete a device. Admin only."""
     device = db.query(Device).filter(
         Device.id == device_id,
         Device.user_id == current_user.id
@@ -134,4 +134,5 @@ async def delete_device(
         )
     
     db.delete(device)
-    db.commit() 
+    db.commit()
+    return {"message": "Device deleted successfully"} 

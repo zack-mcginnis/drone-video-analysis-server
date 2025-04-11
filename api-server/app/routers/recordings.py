@@ -58,8 +58,9 @@ def read_recording(
 def create_recording(
     recording: schemas.RecordingCreate,
     db: Session = Depends(database.get_db),
-    current_user: User = Depends(auth_service.get_current_user)
+    current_user: User = Depends(auth_service.get_admin_user)
 ):
+    """Create a new recording. Admin only."""
     # Set the user_id to the current user's ID
     recording.user_id = current_user.id
     print("Creating recording")
@@ -84,12 +85,22 @@ def update_recording(
 def delete_recording(
     recording_id: int,
     db: Session = Depends(database.get_db),
-    current_user: User = Depends(auth_service.get_current_user)
+    current_user: User = Depends(auth_service.get_admin_user)
 ):
-    success = crud.delete_recording(db, recording_id=recording_id, user_id=current_user.id)
-    if not success:
+    """Delete a recording. Admin only."""
+    db_recording = crud.get_recording(db, recording_id=recording_id, user_id=current_user.id)
+    if db_recording is None:
         raise HTTPException(status_code=404, detail="Recording not found")
-    return {"detail": "Recording deleted successfully"}
+    
+    # Delete the recording file if it exists
+    if db_recording.file_path and os.path.exists(db_recording.file_path):
+        os.remove(db_recording.file_path)
+    
+    # Delete the recording from the database
+    db.delete(db_recording)
+    db.commit()
+    
+    return {"message": "Recording deleted successfully"}
 
 @router.get("/stream/{recording_id}")
 async def stream_recording(
