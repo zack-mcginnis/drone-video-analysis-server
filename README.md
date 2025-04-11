@@ -1,6 +1,6 @@
-# DJI Drone Video Streaming Project
+# DJI Drone Video Streaming and Analysis Platform
 
-This project creates a system for streaming video from a DJI drone to a web application. It consists of three main components that work together to capture, process, and display the video stream.
+This project creates a scalable system for streaming, recording, and analyzing video from DJI drones. It consists of several microservices that work together to provide a robust video processing and analysis platform. The purpose of this project is to provide a private and secure system for storing and accessing your video data while removing the dependency on a 3rd party (DJI, Youtube) to access your data.
 
 ## Project Components
 
@@ -12,31 +12,38 @@ The RTMP (Real-Time Messaging Protocol) server is responsible for receiving vide
 - Convert the video to HLS (HTTP Live Streaming) format
 - Serve the HLS stream to web clients
 - Enable cross-origin resource sharing (CORS) for web access
+- Record video streams to local storage or S3
+- Integrate with the API server for metadata management
 
-The server runs in a Docker container and exposes two ports:
+The server runs in a Docker container and exposes:
 - Port 1935 for RTMP input
 - Port 8080 for HLS output
 
-### 2. Mock Video Source
+### 2. API Server
 
-Since we may not always have access to a physical DJI drone for development and testing, this component simulates a drone by:
+A FastAPI-based microservice that provides:
+- RESTful API endpoints for video management
+- Authentication and authorization via Auth0
+- Video metadata storage in PostgreSQL
+- Integration with storage services (local/S3)
+- Real-time video analysis capabilities
+- WebSocket support for live updates
 
+### 3. Mock Video Source
+
+A development tool that simulates a drone by:
 - Connecting to the RTMP server
 - Continuously streaming a sample video in a loop
 - Using FFmpeg to encode the video in a format compatible with the RTMP server
+- Testing the complete pipeline in development environments
 
-This component also runs in a Docker container and automatically connects to the RTMP server when started.
+### 4. PostgreSQL Database
 
-### 3. Web Application Client
-
-The web client is a React-based progressive web application that:
-
-- Connects to the RTMP server to receive the video stream
-- Displays the video using HLS.js, a JavaScript library for HLS playback
-- Provides a responsive user interface for viewing the drone footage
-- Handles network interruptions and reconnections gracefully
-
-The web client runs locally on the host machine (not in a Docker container).
+Stores:
+- Video metadata
+- User information
+- Analysis results
+- System configuration
 
 ## Building and Running the Project
 
@@ -45,94 +52,88 @@ The web client runs locally on the host machine (not in a Docker container).
 - Docker and Docker Compose
 - Node.js and Yarn
 - Git
+- AWS CLI (for production deployment)
 
 ### Setup and Run
 
 1. **Clone the repository**
    ```bash
    git clone <repository-url>
-   cd drone-video-stream
+   cd drone-video-analysis-server
    ```
 
-2. **Start the Docker containers**
+2. **Configure environment variables**
+   ```bash
+   cp .env.example .env
+   # Edit .env with your configuration
+   ```
+
+3. **Start the services**
    ```bash
    docker-compose up -d
    ```
-   This will build and start both the RTMP server and mock video source containers.
-
-3. **Start the web application**
-   ```bash
-   cd webapp-client
-   cp .env.example .env  # Create your environment file
-   yarn install
-   yarn start
-   ```
-   This will install the necessary dependencies and start the React development server.
-
-4. **Access the web application**
-   Open your browser and navigate to http://localhost:3000
+   This will start:
+   - RTMP server
+   - API server
+   - PostgreSQL database
+   - Mock video source (optional)
 
 ### Stopping the Project
 
-1. **Stop the web application**
-   Press `Ctrl+C` in the terminal where the React app is running.
-
-2. **Stop the Docker containers**
-   ```bash
-   docker-compose down
-   ```
+```bash
+docker-compose down
+```
 
 ## Development Notes
 
-- The RTMP server is configured to accept any RTMP stream at `rtmp://localhost:1935/live/<stream-key>`
+- The RTMP server accepts streams at `rtmp://localhost:1935/live/<stream-key>`
 - The HLS stream is available at `http://localhost:8080/hls/<stream-key>.m3u8`
-- The mock video source uses `drone_stream` as the stream key
-- The web application is configured to connect to `http://localhost:8080/hls/drone_stream.m3u8` by default (set in the `.env` file)
+- API documentation is available at `http://localhost:8000/docs`
+- WebSocket endpoint is at `ws://localhost:8000/ws`
 
-## Using with a Real DJI Drone
+## Production Deployment
 
-To use this system with a real DJI drone:
+The project can be deployed to AWS using the provided deployment script:
 
-1. Configure the drone to stream to `rtmp://your-server-ip:1935/live/drone_stream`
-2. Ensure the drone and server are on the same network or the server is accessible from the drone's network
-3. No need to run the mock video source container when using a real drone
+```bash
+./deploy-to-aws.sh
+```
 
-## Troubleshooting
-
-- If the video doesn't appear, check the browser console for errors
-- Verify that the RTMP server is running with `docker-compose ps`
-- Check the RTMP server logs with `docker-compose logs rtmp-server`
-- Ensure the stream URL in the web app's `.env` file matches the actual stream path
-
-## Environment Configuration
-
-This project uses a single `.env` file at the root directory for all environment variables:
-
-1. **Create your environment file**
-   ```bash
-   cp .env.example .env
-   ```
-
-2. **Edit the `.env` file** with your specific configuration values.
-
-3. **For local development**, the default values should work out of the box.
-
-4. **For AWS deployment**, you'll need to fill in the AWS-specific variables before running the deploy script. 
+See `AWS-DEPLOYMENT.md` for detailed deployment instructions.
 
 ## Data Storage
 
-This project maintains full control over video data without exposing anything to DJI servers by using the following storage strategy:
+The platform supports multiple storage configurations:
 
 ### Local Development Environment
-- Video metadata is stored in a local PostgreSQL database
-- Video files are saved in a local `/recordings` directory on your machine
+- Video metadata in PostgreSQL
+- Video files in local `/recordings` directory
+- Analysis results in PostgreSQL
 
 ### AWS Production Environment
-- Video metadata is stored in a deployed PostgreSQL database in AWS
-- Video files are stored in an AWS S3 bucket
+- Video metadata in RDS PostgreSQL
+- Video files in S3
+- Analysis results in RDS PostgreSQL
+- CloudWatch for logging and monitoring
 
-This approach provides:
-- Complete data sovereignty
-- No dependency on third-party cloud services for video storage
-- Flexible deployment options with consistent architecture
-- Secure and private data management 
+## Security Features
+
+- Auth0 integration for authentication
+- Secure WebSocket connections
+- Environment-based configuration
+- AWS IAM role-based access control
+- Encrypted data storage
+
+## Monitoring and Logging
+
+- Structured logging across all services
+- CloudWatch integration in production
+- Health check endpoints
+- Performance metrics collection
+
+## Troubleshooting
+
+- Check service logs: `docker-compose logs <service-name>`
+- Verify RTMP server status: `docker-compose ps`
+- Check API server health: `http://localhost:8000/health`
+- Review CloudWatch logs in production 
