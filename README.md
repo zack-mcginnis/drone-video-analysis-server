@@ -1,5 +1,7 @@
 # DJI Drone Video Streaming and Analysis Platform
 
+> Keywords: drone-video, video-streaming, video-analysis, dji-drone, rtmp-server, hls-streaming, video-processing, microservices, fastapi, python, aws, docker, nginx, video-recording, video-storage, s3, real-time-streaming, video-analytics
+
 This project creates a scalable system for streaming, recording, and analyzing video from DJI drones. It consists of several microservices that work together to provide a robust video processing and analysis platform. The purpose of this project is to provide a private and secure system for storing and accessing your video data while removing the dependency on a 3rd party (DJI, Youtube) to access your data.
 
 ## Project Components
