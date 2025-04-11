@@ -32,6 +32,8 @@ services:
     build: ./mock-video-source
     depends_on:
       - rtmp-server
+      - api-server
+      - db
     networks:
       - app-network
 

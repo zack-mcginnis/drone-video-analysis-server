@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 import logging
 import requests
-from app.models import User
+from app.models import User, Device
 
 from ..utils.video import process_video_for_streaming, get_video_info
 from ..utils.s3 import get_s3_client, generate_presigned_url, download_from_s3
@@ -172,7 +172,16 @@ async def stream_recording(
                 "processed_at": datetime.now().isoformat(),
                 "video_info": video_info
             })
-            crud.update_recording_metadata(db, recording_id, metadata)
+            logger.info(f"Updating recording metadata for recording_id={recording_id}, user_id={current_user.id}")
+            try:
+                updated_recording = crud.update_recording_metadata(db, recording_id, metadata, current_user.id)
+                logger.info(f"Successfully updated recording metadata: {updated_recording}")
+            except ValueError as e:
+                logger.error(f"Recording not found: {str(e)}")
+                raise HTTPException(status_code=404, detail=str(e))
+            except Exception as e:
+                logger.error(f"Failed to update recording metadata: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Failed to update recording metadata: {str(e)}")
 
         # Construct the HLS URLs
         base_url = str(request.base_url).rstrip('/')
@@ -583,7 +592,7 @@ async def get_stream_recordings(
 @router.post("/rtmp/{stream_key}", response_model=schemas.Recording)
 def create_recording_from_rtmp(
     stream_key: str,
-    recording: schemas.RecordingCreate,
+    recording: dict,
     db: Session = Depends(database.get_db)
 ):
     """
@@ -591,20 +600,43 @@ def create_recording_from_rtmp(
     This endpoint should only be accessible from the RTMP server.
     """
     try:
-        # Find user by stream key
-        user = db.query(User).filter(
-            User.stream_keys.contains([stream_key])
+        logger.info(f"Received RTMP recording request for stream key: {stream_key}")
+        logger.info(f"Recording data: {recording}")
+        
+        # Find device by stream key
+        device = db.query(Device).filter(
+            Device.stream_key == stream_key,
+            Device.is_active == True
         ).first()
         
-        if not user:
-            logger.error(f"No user found for stream key: {stream_key}")
+        if not device:
+            logger.error(f"No active device found for stream key: {stream_key}")
             raise HTTPException(status_code=404, detail="Invalid stream key")
         
-        # Set the user_id in the recording
-        recording.user_id = user.id
+        logger.info(f"Found device: {device.id} for user: {device.user_id}")
         
-        logger.info(f"Creating recording for user {user.id} with stream key {stream_key}")
-        return crud.create_recording(db=db, recording=recording)
+        # Add user_id to the recording dictionary
+        recording["user_id"] = device.user_id
+        
+        # Convert the dict to a RecordingCreate schema
+        try:
+            recording_schema = schemas.RecordingCreate(**recording)
+            logger.info(f"Successfully created recording schema: {recording_schema}")
+        except Exception as e:
+            logger.error(f"Error creating recording schema: {str(e)}")
+            raise HTTPException(status_code=422, detail=str(e))
+        
+        # Create the recording
+        try:
+            db_recording = crud.create_recording(db=db, recording=recording_schema)
+            logger.info(f"Successfully created recording in database with ID: {db_recording.id}")
+            return db_recording
+        except Exception as e:
+            logger.error(f"Error creating recording in database: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+            
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error creating recording from RTMP: {str(e)}")
+        logger.error(f"Unexpected error in create_recording_from_rtmp: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e)) 

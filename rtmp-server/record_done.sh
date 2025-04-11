@@ -187,11 +187,17 @@ send_recording_metadata() {
 EOF
 )
     
+    # Log the payload for debugging
+    echo "$(date): Sending recording metadata to API server" >> /var/log/nginx/recording.log
+    echo "$(date): Stream key: $STREAM_KEY" >> /var/log/nginx/recording.log
+    echo "$(date): API Server URL: $API_SERVER_URL" >> /var/log/nginx/recording.log
+    echo "$(date): JSON Payload: $JSON_PAYLOAD" >> /var/log/nginx/recording.log
+    
     # Send to API server with stream key in URL
     API_SERVER_URL=${API_SERVER_URL:-"http://api-server:8000"}
     
     # Make API request with better error handling
-    CURL_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+    CURL_RESPONSE=$(curl -v -s -w "\n%{http_code}" -X POST \
         -H "Content-Type: application/json" \
         -d "$JSON_PAYLOAD" \
         "$API_SERVER_URL/recordings/rtmp/$STREAM_KEY" 2>&1)
@@ -199,6 +205,9 @@ EOF
     # Extract HTTP status code and response body
     HTTP_STATUS=$(echo "$CURL_RESPONSE" | tail -n1)
     RESPONSE_BODY=$(echo "$CURL_RESPONSE" | sed '$d')
+    
+    # Log the full response for debugging
+    echo "$(date): Full curl response: $CURL_RESPONSE" >> /var/log/nginx/recording.log
     
     # Check if API call was successful
     if [ $? -eq 0 ] && [ "$HTTP_STATUS" -eq 200 ]; then

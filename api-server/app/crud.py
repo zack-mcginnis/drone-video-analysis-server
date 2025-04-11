@@ -59,7 +59,7 @@ def update_recording_metadata(db: Session, recording_id: int, metadata: dict, us
     ).first()
     
     if db_recording is None:
-        return None
+        raise ValueError(f"Recording not found for id={recording_id} and user_id={user_id}")
     
     db_recording.recording_metadata = metadata
     db.commit()

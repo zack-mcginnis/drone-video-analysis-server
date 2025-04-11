@@ -25,4 +25,30 @@ class Recording(RecordingBase):
 
 class RecordingList(BaseModel):
     recordings: list[Recording]
+    count: int
+
+class DeviceBase(BaseModel):
+    name: str
+
+class DeviceCreate(DeviceBase):
+    pass
+
+class DeviceUpdate(BaseModel):
+    name: str
+    is_active: Optional[bool] = None
+
+class Device(DeviceBase):
+    id: int
+    stream_key: str
+    created_at: datetime
+    updated_at: datetime
+    last_seen_at: Optional[datetime]
+    is_active: bool
+    user_id: int
+
+    class Config:
+        orm_mode = True
+
+class DeviceList(BaseModel):
+    devices: list[Device]
     count: int 

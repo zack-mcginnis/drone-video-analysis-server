@@ -3,7 +3,7 @@ import os
 import time
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from .routers import recordings, users, stream
+from .routers import recordings, users, stream, devices
 from . import models
 from .database import engine, SQLALCHEMY_DATABASE_URL
 import boto3
@@ -97,6 +97,7 @@ if os.getenv("ENVIRONMENT", "local").lower() == "local":
 app.include_router(recordings.router)
 app.include_router(users.router)
 app.include_router(stream.router)
+app.include_router(devices.router)
 
 @app.get("/")
 def read_root():
