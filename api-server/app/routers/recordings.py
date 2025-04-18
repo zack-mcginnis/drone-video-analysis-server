@@ -624,10 +624,16 @@ def create_recording_from_rtmp(
             logger.error(f"No active device found for stream key: {stream_key}")
             raise HTTPException(status_code=404, detail="Invalid stream key")
         
-        logger.info(f"Found device: {device.id} for user: {device.user_id}")
+        # Get the first user associated with this device
+        if not device.users:
+            logger.error(f"Device {device.id} has no associated users")
+            raise HTTPException(status_code=400, detail="Device has no associated users")
+            
+        user_id = device.users[0].id
+        logger.info(f"Found device: {device.id} for user: {user_id}")
         
         # Add user_id to the recording dictionary
-        recording["user_id"] = device.user_id
+        recording["user_id"] = user_id
         
         # Convert the dict to a RecordingCreate schema
         try:
