@@ -58,3 +58,6 @@ deploy-to-aws-with-creds.sh
 # Backup files that might contain credentials
 *.bak
 *-backup.*
+
+# Mock video source
+mock-video-source/sample.mp4

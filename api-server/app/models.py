@@ -1,7 +1,16 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text, BigInteger, JSON, Boolean, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Text, BigInteger, JSON, Boolean, ForeignKey, Table
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .database import Base
+
+# Association table for User-Device many-to-many relationship
+user_device_association = Table(
+    "user_device_association",
+    Base.metadata,
+    Column("user_id", Integer, ForeignKey("users.id"), primary_key=True),
+    Column("device_id", Integer, ForeignKey("devices.id"), primary_key=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now()),
+)
 
 class Recording(Base):
     __tablename__ = "recordings"
@@ -31,10 +40,9 @@ class Device(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     last_seen_at = Column(DateTime(timezone=True), nullable=True)
     is_active = Column(Boolean, default=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     
-    # Relationship with User model
-    owner = relationship("User", back_populates="devices")
+    # Updated relationship with User model to be many-to-many
+    users = relationship("User", secondary=user_device_association, back_populates="devices")
 
 class User(Base):
     __tablename__ = "users"
@@ -49,4 +57,4 @@ class User(Base):
     
     # Relationships
     recordings = relationship("Recording", back_populates="owner")
-    devices = relationship("Device", back_populates="owner") 
+    devices = relationship("Device", secondary=user_device_association, back_populates="users") 

@@ -14,7 +14,7 @@ echo "RTMP server is ready. Starting video stream..."
 while true; do
     echo "Starting ffmpeg stream..."
     # Use exec to replace the shell process with ffmpeg
-    ffmpeg -re -i /videos/sample.mp4 -c:v libx264 -c:a aac -f flv rtmp://rtmp-server:1935/live/RTCzYugC || true
+    ffmpeg -re -i /sample.mp4 -c:v libx264 -c:a aac -f flv rtmp://rtmp-server:1935/live/RTCzYugC || true
     echo "Stream ended. Restarting in 1 second..."
     sleep 1
 done 

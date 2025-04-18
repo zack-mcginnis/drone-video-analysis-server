@@ -10,6 +10,8 @@ RUN mkdir -p /videos && \
 COPY stream.sh /stream.sh
 RUN chmod +x /stream.sh
 
+COPY sample.mp4 /sample.mp4
+
 # Make sure the script is properly formatted with Unix line endings
 RUN sed -i 's/\r$//' /stream.sh
 
