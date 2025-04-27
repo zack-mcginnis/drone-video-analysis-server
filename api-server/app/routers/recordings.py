@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse, JSONResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
@@ -31,6 +31,136 @@ router = APIRouter(
 
 RECORDINGS_DIR = "/recordings"
 HLS_DIR = os.path.join(RECORDINGS_DIR, "hls")
+
+# Add a background task processor for HLS conversion
+async def process_recording_background(recording_id: int, db: Session):
+    """
+    Background task to process a video recording for HLS streaming.
+    
+    Args:
+        recording_id: ID of the recording to process
+        db: Database session
+    """
+    logger.info(f"Starting background processing for recording {recording_id}")
+    
+    try:
+        # Get recording from database
+        db_recording = crud.get_recording(db, recording_id=recording_id)
+        if db_recording is None:
+            logger.error(f"Recording {recording_id} not found in background task")
+            return
+            
+        # Ensure HLS directory exists
+        os.makedirs(HLS_DIR, exist_ok=True)
+        hls_output_dir = os.path.join(HLS_DIR, str(recording_id))
+        
+        # Process based on environment
+        if db_recording.environment == "local":
+            # Handle local file
+            file_path = db_recording.file_path
+            if not file_path.startswith('/recordings/'):
+                file_path = os.path.join(RECORDINGS_DIR, os.path.basename(file_path))
+            
+            if not os.path.exists(file_path):
+                logger.error(f"Recording file not found at: {file_path}")
+                update_transcoding_status(db, db_recording, "failed", f"File not found at {file_path}")
+                return
+                
+            # Process video for HLS streaming
+            logger.info(f"Processing local video for streaming: {file_path}")
+            try:
+                playlist_path, video_info = process_video_for_streaming(file_path, hls_output_dir)
+                logger.info(f"HLS playlist created at: {playlist_path}")
+            except Exception as e:
+                logger.error(f"Failed to process video for streaming: {str(e)}")
+                update_transcoding_status(db, db_recording, "failed", str(e))
+                return
+                
+        else:
+            # Handle AWS S3 file
+            if not db_recording.s3_path:
+                logger.error(f"Recording does not have an S3 path: {recording_id}")
+                update_transcoding_status(db, db_recording, "failed", "Recording does not have an S3 path")
+                return
+                
+            s3_path = db_recording.s3_path
+            if s3_path.startswith("s3://"):
+                s3_path = s3_path[5:]
+                
+            # Download from S3
+            with tempfile.NamedTemporaryFile(suffix='.mp4') as temp_file:
+                logger.info(f"Downloading from S3: {s3_path}")
+                
+                try:
+                    if not download_from_s3(s3_path, temp_file.name):
+                        logger.error("Failed to download file from S3")
+                        update_transcoding_status(db, db_recording, "failed", "Error downloading from S3")
+                        return
+                except Exception as e:
+                    logger.error(f"S3 download error: {str(e)}")
+                    update_transcoding_status(db, db_recording, "failed", f"S3 download error: {str(e)}")
+                    return
+                    
+                # Process video for HLS streaming
+                logger.info(f"Processing S3 video for streaming: {temp_file.name}")
+                try:
+                    playlist_path, video_info = process_video_for_streaming(temp_file.name, hls_output_dir)
+                    logger.info(f"HLS playlist created at: {playlist_path}")
+                except Exception as e:
+                    logger.error(f"Failed to process S3 video: {str(e)}")
+                    update_transcoding_status(db, db_recording, "failed", f"Failed to process video: {str(e)}")
+                    return
+        
+        # Update recording metadata with HLS information
+        metadata = db_recording.recording_metadata or {}
+        metadata.update({
+            "hls_path": hls_output_dir,
+            "processed": True,
+            "transcoding_status": "completed",
+            "transcoding_completed_at": datetime.now().isoformat(),
+            "video_info": video_info
+        })
+        
+        # Update the recording in the database
+        try:
+            db_recording.recording_metadata = metadata
+            db.commit()
+            db.refresh(db_recording)
+            logger.info(f"Successfully processed recording {recording_id} for HLS streaming")
+        except Exception as e:
+            logger.error(f"Database error updating metadata: {str(e)}")
+            db.rollback()
+            update_transcoding_status(db, db_recording, "failed", f"Database error: {str(e)}")
+            
+    except Exception as e:
+        logger.error(f"Unexpected error in background processing task: {str(e)}")
+        try:
+            # Try to update status to failed
+            db_recording = db.query(models.Recording).filter(models.Recording.id == recording_id).first()
+            if db_recording:
+                update_transcoding_status(db, db_recording, "failed", f"Unexpected error: {str(e)}")
+        except:
+            logger.error("Could not update failure status in database")
+
+def update_transcoding_status(db: Session, recording, status: str, error_message: str = None):
+    """Helper function to update transcoding status"""
+    try:
+        metadata = recording.recording_metadata or {}
+        metadata.update({
+            "transcoding_status": status,
+            "transcoding_completed_at": datetime.now().isoformat()
+        })
+        
+        if error_message:
+            metadata["transcoding_error"] = error_message
+            
+        recording.recording_metadata = metadata
+        db.commit()
+        db.refresh(recording)
+        logger.info(f"Updated transcoding status to {status} for recording {recording.id}")
+    except Exception as e:
+        logger.error(f"Failed to update transcoding status: {str(e)}")
+        db.rollback()
 
 @router.get("/", response_model=schemas.RecordingList)
 def read_recordings(
@@ -106,6 +236,7 @@ def delete_recording(
 async def stream_recording(
     recording_id: int, 
     request: Request, 
+    background_tasks: BackgroundTasks,
     db: Session = Depends(database.get_db),
     current_user: User = Depends(auth_service.get_current_user)
 ) -> Dict[str, Any]:
@@ -115,96 +246,152 @@ async def stream_recording(
     Args:
         recording_id: ID of the recording to stream
         request: FastAPI request object
+        background_tasks: FastAPI background tasks
         db: Database session
     
     Returns:
         Dictionary containing stream URL and video information
     """
     try:
-        # Get recording from database
-        db_recording = crud.get_recording(db, recording_id=recording_id, user_id=current_user.id)
+        # Get recording from database without user_id check
+        db_recording = crud.get_recording(db, recording_id=recording_id)
         if db_recording is None:
+            logger.error(f"Recording not found with ID: {recording_id}")
             raise HTTPException(status_code=404, detail="Recording not found")
+
+        # Check if the recording belongs to the current user
+        if db_recording.user_id == current_user.id:
+            logger.info(f"User {current_user.id} is the owner of recording {recording_id}")
+            # User is the owner, allow access
+            pass
+        else:
+            # Check if user has access through device association
+            stream_name = db_recording.stream_name
+            logger.info(f"Checking device access for user {current_user.id}, recording {recording_id}, stream {stream_name}")
+            
+            # Try to find device using stream_key
+            user_devices = db.query(Device).filter(
+                Device.users.any(id=current_user.id),
+                Device.is_active == True,
+                Device.stream_key == stream_name
+            ).first()
+
+            if not user_devices:
+                # If not found by stream_key, check if recording metadata has stream_id
+                if db_recording.recording_metadata and "stream_id" in db_recording.recording_metadata:
+                    stream_id = db_recording.recording_metadata["stream_id"]
+                    logger.info(f"Checking access using stream_id from metadata: {stream_id}")
+                    
+                    # Check if any device for this user has a matching stream_key
+                    user_devices = db.query(Device).filter(
+                        Device.users.any(id=current_user.id),
+                        Device.is_active == True,
+                        Device.stream_key == stream_id
+                    ).first()
+            
+            if not user_devices:
+                logger.error(f"User {current_user.id} does not have access to recording {recording_id} with stream {stream_name}")
+                raise HTTPException(status_code=403, detail="You do not have permission to access this recording")
 
         # Ensure HLS directory exists
         os.makedirs(HLS_DIR, exist_ok=True)
         hls_output_dir = os.path.join(HLS_DIR, str(recording_id))
+        base_url = str(request.base_url).rstrip('/')
+        stream_url = f"{base_url}/recordings/hls/{recording_id}/playlist.m3u8"
 
         # Check if we already have an HLS version
         if (db_recording.recording_metadata and 
             "hls_path" in db_recording.recording_metadata and 
-            os.path.exists(os.path.join(db_recording.recording_metadata["hls_path"], "playlist.m3u8"))):
+            os.path.exists(os.path.join(db_recording.recording_metadata.get("hls_path", ""), "playlist.m3u8"))):
             
             logger.info(f"Using existing HLS version for recording {recording_id}")
-            video_info = db_recording.recording_metadata.get("video_info", {})
-            playlist_path = os.path.join(db_recording.recording_metadata["hls_path"], "playlist.m3u8")
-        else:
-            # Get the video file based on environment
-            if db_recording.environment == "local":
-                # Handle local file
-                file_path = db_recording.file_path
-                if not file_path.startswith('/recordings/'):
-                    file_path = os.path.join(RECORDINGS_DIR, os.path.basename(file_path))
-
-                if not os.path.exists(file_path):
-                    logger.error(f"Recording file not found at: {file_path}")
-                    raise HTTPException(status_code=404, detail="Recording file not found")
-
-                # Process video for HLS streaming
-                logger.info(f"Processing local video for streaming: {file_path}")
-                playlist_path, video_info = process_video_for_streaming(file_path, hls_output_dir)
-
+            
+            # Check if transcoding is completed
+            if (db_recording.recording_metadata.get("transcoding_status") == "completed" or
+                db_recording.recording_metadata.get("processed", False) == True):
+                
+                video_info = db_recording.recording_metadata.get("video_info", {})
+                return {
+                    "stream_url": stream_url,
+                    "format": "hls",
+                    "mime_type": "application/vnd.apple.mpegurl",
+                    "video_info": video_info,
+                    "status": "ready"
+                }
+                
+            # If transcoding failed, return error status
+            elif db_recording.recording_metadata.get("transcoding_status") == "failed":
+                error_msg = db_recording.recording_metadata.get("transcoding_error", "Unknown error")
+                return {
+                    "status": "failed",
+                    "error": error_msg,
+                    "message": f"Processing failed: {error_msg}"
+                }
+            
+        # Check if transcoding is already in progress
+        if (db_recording.recording_metadata and 
+            "transcoding_status" in db_recording.recording_metadata and 
+            db_recording.recording_metadata["transcoding_status"] == "in_progress"):
+            
+            # Check if processing has been running too long (more than 10 minutes)
+            if "transcoding_started_at" in db_recording.recording_metadata:
+                started_at = datetime.fromisoformat(db_recording.recording_metadata["transcoding_started_at"])
+                if (datetime.now() - started_at) > timedelta(minutes=10):
+                    logger.warning(f"Transcoding has been running for >10 min for recording {recording_id}, restarting")
+                    # Processing might have stalled, restart it
+                    pass
+                else:
+                    logger.info(f"HLS transcoding already in progress for recording {recording_id}")
+                    # Return info with processing status
+                    return {
+                        "stream_url": stream_url,
+                        "format": "hls",
+                        "mime_type": "application/vnd.apple.mpegurl",
+                        "status": "processing",
+                        "message": "Video is being processed, please check back shortly"
+                    }
             else:
-                # Handle AWS S3 file
-                if not db_recording.s3_path:
-                    raise HTTPException(status_code=400, detail="Recording does not have an S3 path")
-
-                s3_path = db_recording.s3_path
-                if s3_path.startswith("s3://"):
-                    s3_path = s3_path[5:]
-
-                # Download from S3 using pre-signed URL
-                with tempfile.NamedTemporaryFile(suffix='.mp4') as temp_file:
-                    logger.info(f"Downloading from S3: {s3_path}")
-                    
-                    if not download_from_s3(s3_path, temp_file.name):
-                        logger.error("Failed to download file from S3")
-                        raise HTTPException(status_code=500, detail="Error downloading recording from S3")
-
-                    # Process video for HLS streaming
-                    logger.info(f"Processing S3 video for streaming: {temp_file.name}")
-                    playlist_path, video_info = process_video_for_streaming(temp_file.name, hls_output_dir)
-
-            # Update recording metadata with HLS information
-            metadata = db_recording.recording_metadata or {}
-            metadata.update({
-                "hls_path": hls_output_dir,
-                "processed": True,
-                "processed_at": datetime.now().isoformat(),
-                "video_info": video_info
-            })
-            logger.info(f"Updating recording metadata for recording_id={recording_id}, user_id={current_user.id}")
-            try:
-                updated_recording = crud.update_recording_metadata(db, recording_id, metadata, current_user.id)
-                logger.info(f"Successfully updated recording metadata: {updated_recording}")
-            except ValueError as e:
-                logger.error(f"Recording not found: {str(e)}")
-                raise HTTPException(status_code=404, detail=str(e))
-            except Exception as e:
-                logger.error(f"Failed to update recording metadata: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Failed to update recording metadata: {str(e)}")
-
-        # Construct the HLS URLs
-        base_url = str(request.base_url).rstrip('/')
-        stream_url = f"{base_url}/recordings/hls/{recording_id}/playlist.m3u8"
+                logger.info(f"HLS transcoding already in progress for recording {recording_id} (no start time)")
+                return {
+                    "stream_url": stream_url,
+                    "format": "hls",
+                    "mime_type": "application/vnd.apple.mpegurl",
+                    "status": "processing",
+                    "message": "Video is being processed, please check back shortly"
+                }
+            
+        # Otherwise, start the transcoding process asynchronously
+        # Update metadata to indicate processing has started
+        metadata = db_recording.recording_metadata or {}
+        metadata.update({
+            "transcoding_status": "in_progress",
+            "transcoding_started_at": datetime.now().isoformat()
+        })
         
+        try:
+            db_recording.recording_metadata = metadata
+            db.commit()
+            db.refresh(db_recording)
+            logger.info(f"Marked recording {recording_id} as processing")
+        except Exception as e:
+            logger.error(f"Failed to update recording metadata: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to update recording metadata: {str(e)}")
+
+        # Add background task for processing
+        background_tasks.add_task(process_recording_background, recording_id, db)
+        
+        # Return immediate response to client
         return {
             "stream_url": stream_url,
             "format": "hls",
             "mime_type": "application/vnd.apple.mpegurl",
-            "video_info": video_info
+            "status": "processing",
+            "message": "Your video is being processed. Please check back in a few moments."
         }
         
+    except HTTPException:
+        # Re-raise HTTP exceptions to preserve their status code and detail
+        raise
     except Exception as e:
         logger.error(f"Error streaming recording {recording_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -656,4 +843,102 @@ def create_recording_from_rtmp(
         raise
     except Exception as e:
         logger.error(f"Unexpected error in create_recording_from_rtmp: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) 
+
+@router.get("/{recording_id}/status")
+async def get_recording_status(
+    recording_id: int,
+    db: Session = Depends(database.get_db),
+    current_user: User = Depends(auth_service.get_current_user)
+) -> Dict[str, Any]:
+    """
+    Get the transcoding status of a recording.
+    
+    Args:
+        recording_id: ID of the recording
+        
+    Returns:
+        Status information about the recording
+    """
+    try:
+        # Get recording from database
+        db_recording = crud.get_recording(db, recording_id=recording_id)
+        if db_recording is None:
+            raise HTTPException(status_code=404, detail="Recording not found")
+            
+        # Check permissions
+        if db_recording.user_id != current_user.id:
+            # Check if user has access through device association
+            stream_name = db_recording.stream_name
+            user_devices = db.query(Device).filter(
+                Device.users.any(id=current_user.id),
+                Device.is_active == True,
+                Device.stream_key == stream_name
+            ).first()
+            
+            if not user_devices:
+                # Try with stream_id from metadata
+                if db_recording.recording_metadata and "stream_id" in db_recording.recording_metadata:
+                    stream_id = db_recording.recording_metadata["stream_id"]
+                    user_devices = db.query(Device).filter(
+                        Device.users.any(id=current_user.id),
+                        Device.is_active == True,
+                        Device.stream_key == stream_id
+                    ).first()
+                    
+                if not user_devices:
+                    raise HTTPException(status_code=403, detail="You do not have permission to access this recording")
+        
+        # Check if metadata exists
+        if not db_recording.recording_metadata:
+            return {
+                "id": recording_id,
+                "status": "unknown",
+                "message": "No processing metadata available"
+            }
+            
+        # Check processing status
+        if "transcoding_status" in db_recording.recording_metadata:
+            status = db_recording.recording_metadata["transcoding_status"]
+            
+            # Build response
+            response = {
+                "id": recording_id,
+                "status": status,
+                "started_at": db_recording.recording_metadata.get("transcoding_started_at"),
+                "completed_at": db_recording.recording_metadata.get("transcoding_completed_at")
+            }
+            
+            # Add error message if present
+            if status == "failed" and "transcoding_error" in db_recording.recording_metadata:
+                response["error"] = db_recording.recording_metadata["transcoding_error"]
+                
+            # Add HLS info if complete
+            if status == "completed":
+                response["hls_path"] = db_recording.recording_metadata.get("hls_path")
+                response["video_info"] = db_recording.recording_metadata.get("video_info", {})
+                
+            return response
+            
+        # Check for legacy "processed" flag
+        elif "processed" in db_recording.recording_metadata and db_recording.recording_metadata["processed"]:
+            return {
+                "id": recording_id,
+                "status": "completed",
+                "hls_path": db_recording.recording_metadata.get("hls_path"),
+                "processed_at": db_recording.recording_metadata.get("processed_at"),
+                "video_info": db_recording.recording_metadata.get("video_info", {})
+            }
+            
+        # Default response if no status info
+        return {
+            "id": recording_id,
+            "status": "unknown",
+            "message": "No processing status available"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting recording status: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e)) 
