@@ -128,19 +128,47 @@ class AuthService:
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        # Find user in database
-        user = db.query(User).filter(User.email == email).first()
+        # First, try to find user by auth0_id (which is unique)
+        user = db.query(User).filter(User.auth0_id == auth0_id).first()
         
-        # If user doesn't exist, create them
+        # If not found by auth0_id, check by email as fallback
         if not user:
-            user = User(
-                email=email,
-                auth0_id=auth0_id,
-                is_active=True
-            )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
+            user = db.query(User).filter(User.email == email).first()
+        
+        # If user doesn't exist, create them with retry logic for race conditions
+        if not user:
+            max_retries = 3
+            retry_count = 0
+            
+            while retry_count < max_retries:
+                try:
+                    # Check one more time in case user was created in another request
+                    user = db.query(User).filter(User.auth0_id == auth0_id).first()
+                    if user:
+                        break
+                        
+                    user = User(
+                        email=email,
+                        auth0_id=auth0_id,
+                        is_active=True
+                    )
+                    db.add(user)
+                    db.commit()
+                    db.refresh(user)
+                    break
+                except Exception as e:
+                    retry_count += 1
+                    db.rollback()
+                    logger.warning(f"Attempt {retry_count} failed to create user: {str(e)}")
+                    if retry_count >= max_retries:
+                        logger.error(f"Failed to create user after {max_retries} attempts: {str(e)}")
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail="Failed to create user record"
+                        )
+                    # Small delay to prevent immediate retry
+                    import asyncio
+                    await asyncio.sleep(0.2)
             
         return user
 

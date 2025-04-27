@@ -18,6 +18,7 @@ from app.models import User, Device
 from ..utils.video import process_video_for_streaming, get_video_info
 from ..utils.s3 import get_s3_client, generate_presigned_url, download_from_s3
 from app.services.auth import auth_service
+from app.services.video_processor import submit_processing_job
 
 load_dotenv()
 
@@ -32,16 +33,18 @@ router = APIRouter(
 RECORDINGS_DIR = "/recordings"
 HLS_DIR = os.path.join(RECORDINGS_DIR, "hls")
 
-# Add a background task processor for HLS conversion
+# Add a background task processor for HLS conversion - KEEPING THIS FOR BACKWARDS COMPATIBILITY
 async def process_recording_background(recording_id: int, db: Session):
     """
+    DEPRECATED: Use services.video_processor.submit_processing_job instead
+    
     Background task to process a video recording for HLS streaming.
     
     Args:
         recording_id: ID of the recording to process
         db: Database session
     """
-    logger.info(f"Starting background processing for recording {recording_id}")
+    logger.warning(f"DEPRECATED: Using old background processing for recording {recording_id}. Use submit_processing_job instead.")
     
     try:
         # Get recording from database
@@ -299,12 +302,12 @@ async def stream_recording(
         base_url = str(request.base_url).rstrip('/')
         stream_url = f"{base_url}/recordings/hls/{recording_id}/playlist.m3u8"
 
-        # Check if we already have an HLS version
+        # First check if we already have a ready HLS version
         if (db_recording.recording_metadata and 
             "hls_path" in db_recording.recording_metadata and 
             os.path.exists(os.path.join(db_recording.recording_metadata.get("hls_path", ""), "playlist.m3u8"))):
             
-            logger.info(f"Using existing HLS version for recording {recording_id}")
+            logger.info(f"Found existing HLS version for recording {recording_id}")
             
             # Check if transcoding is completed
             if (db_recording.recording_metadata.get("transcoding_status") == "completed" or
@@ -325,42 +328,121 @@ async def stream_recording(
                 return {
                     "status": "failed",
                     "error": error_msg,
-                    "message": f"Processing failed: {error_msg}"
+                    "message": f"Processing failed: {error_msg}",
+                    "can_retry": True,
+                    "retry_url": f"/recordings/retry-processing/{recording_id}"
                 }
+        
+        # If the recording hasn't been processed or if the processing is incomplete, 
+        # check the processing status in the task queue and database
+        
+        # Check if there's an existing task for this recording
+        try:
+            # Get task status from Celery
+            from app.services.video_processor import check_task_exists
+            existing_task = await check_task_exists(recording_id)
             
-        # Check if transcoding is already in progress
-        if (db_recording.recording_metadata and 
-            "transcoding_status" in db_recording.recording_metadata and 
-            db_recording.recording_metadata["transcoding_status"] == "in_progress"):
-            
-            # Check if processing has been running too long (more than 10 minutes)
-            if "transcoding_started_at" in db_recording.recording_metadata:
-                started_at = datetime.fromisoformat(db_recording.recording_metadata["transcoding_started_at"])
+            if existing_task:
+                logger.info(f"Found existing task for recording {recording_id}: {existing_task}")
+                
+                # If the task exists but is in PENDING state, it might be in queue or lost
+                # Check how long ago it was submitted based on metadata
+                if existing_task["status"] == "PENDING":
+                    if (db_recording.recording_metadata and 
+                        "transcoding_started_at" in db_recording.recording_metadata):
+                        started_at = datetime.fromisoformat(db_recording.recording_metadata["transcoding_started_at"])
                 if (datetime.now() - started_at) > timedelta(minutes=10):
-                    logger.warning(f"Transcoding has been running for >10 min for recording {recording_id}, restarting")
-                    # Processing might have stalled, restart it
-                    pass
+                            logger.warning(f"Task for recording {recording_id} has been pending for >10 min, might be stuck")
+                            # We'll start a new task below
                 else:
-                    logger.info(f"HLS transcoding already in progress for recording {recording_id}")
-                    # Return info with processing status
+                            # Task is in queue and not too old
                     return {
                         "stream_url": stream_url,
                         "format": "hls",
                         "mime_type": "application/vnd.apple.mpegurl",
                         "status": "processing",
-                        "message": "Video is being processed, please check back shortly"
+                        "task_id": existing_task["task_id"],
+                        "message": "Your video is being processed. Please check back in a few moments. 123"
                     }
-            else:
-                logger.info(f"HLS transcoding already in progress for recording {recording_id} (no start time)")
-                return {
-                    "stream_url": stream_url,
-                    "format": "hls",
-                    "mime_type": "application/vnd.apple.mpegurl",
-                    "status": "processing",
-                    "message": "Video is being processed, please check back shortly"
-                }
-            
-        # Otherwise, start the transcoding process asynchronously
+                
+                # If task is in progress, return status
+                if existing_task["status"] in ["STARTED", "PROGRESS"]:
+                    return {
+                        "stream_url": stream_url,
+                        "format": "hls",
+                        "mime_type": "application/vnd.apple.mpegurl",
+                        "status": "processing",
+                        "task_id": existing_task["task_id"],
+                        "message": "Your video is being processed. Please check back in a few moments. 456"
+                    }
+                
+                # If task has completed, update DB and return ready status
+                elif existing_task["status"] == "SUCCESS":
+                    # Double check if the HLS files exist
+                    if os.path.exists(os.path.join(hls_output_dir, "playlist.m3u8")):
+                        # Update metadata if not already updated
+                        if (not db_recording.recording_metadata or 
+                            db_recording.recording_metadata.get("transcoding_status") != "completed"):
+                            
+                            # Add HLS information to metadata
+                            metadata = db_recording.recording_metadata or {}
+                            metadata.update({
+                                "hls_path": hls_output_dir,
+                                "processed": True,
+                                "transcoding_status": "completed",
+                                "transcoding_completed_at": datetime.now().isoformat()
+                            })
+                            
+                            # Update database
+                            db_recording.recording_metadata = metadata
+                            db.commit()
+                            db.refresh(db_recording)
+                        
+                        # Get video info from metadata or use empty dict
+                        video_info = db_recording.recording_metadata.get("video_info", {})
+                        
+                        return {
+                            "stream_url": stream_url,
+                            "format": "hls",
+                            "mime_type": "application/vnd.apple.mpegurl",
+                            "video_info": video_info,
+                            "status": "ready"
+                        }
+                
+                # If task has failed, return error status
+                elif existing_task["status"] in ["FAILURE", "REVOKED"]:
+                    error_msg = existing_task.get("error", "Unknown error")
+                    
+                    # Update metadata if not already updated
+                    if (not db_recording.recording_metadata or 
+                        db_recording.recording_metadata.get("transcoding_status") != "failed"):
+                        
+                        metadata = db_recording.recording_metadata or {}
+                        metadata.update({
+                            "transcoding_status": "failed",
+                            "transcoding_error": error_msg,
+                            "transcoding_completed_at": datetime.now().isoformat(),
+                            "can_retry": True
+                        })
+                        
+                        # Update database
+                        db_recording.recording_metadata = metadata
+                        db.commit()
+                        db.refresh(db_recording)
+                    
+                    return {
+                        "status": "failed",
+                        "error": error_msg,
+                        "message": f"Processing failed: {error_msg}",
+                        "can_retry": True,
+                        "retry_url": f"/recordings/retry-processing/{recording_id}"
+                    }
+
+        except Exception as e:
+            logger.error(f"Error checking task status: {str(e)}")
+            # Continue to process the video if we can't determine status
+        
+        # If we get here, we need to start/restart processing
         # Update metadata to indicate processing has started
         metadata = db_recording.recording_metadata or {}
         metadata.update({
@@ -377,17 +459,59 @@ async def stream_recording(
             logger.error(f"Failed to update recording metadata: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Failed to update recording metadata: {str(e)}")
 
-        # Add background task for processing
-        background_tasks.add_task(process_recording_background, recording_id, db)
-        
-        # Return immediate response to client
-        return {
-            "stream_url": stream_url,
-            "format": "hls",
-            "mime_type": "application/vnd.apple.mpegurl",
-            "status": "processing",
-            "message": "Your video is being processed. Please check back in a few moments."
-        }
+        # Submit task to Celery worker
+        try:
+            task_id = await submit_processing_job(recording_id)
+            
+            # Check if task_id indicates a fallback/dummy task due to Redis connection issues
+            if task_id and task_id.startswith("local-fallback-"):
+                logger.warning(f"Using fallback task ID due to Redis connection issues: {task_id}")
+                
+                # Return status indicating Redis issues but video will be processed 
+                return {
+                    "stream_url": stream_url,
+                    "format": "hls",
+                    "mime_type": "application/vnd.apple.mpegurl",
+                    "status": "delayed_processing",
+                    "task_id": task_id,
+                    "message": "Your video will be processed when the system recovers. Please check back later."
+                }
+            
+            # Add task_id to the response
+            return {
+                "stream_url": stream_url,
+                "format": "hls",
+                "mime_type": "application/vnd.apple.mpegurl",
+                "status": "processing",
+                "task_id": task_id,
+                "message": "Your video is being processed. Please check back in a few moments."
+            }
+        except Exception as e:
+            logger.error(f"Failed to submit processing job: {str(e)}")
+            
+            # Update status to indicate the error but allow user to retry later
+            try:
+                error_metadata = db_recording.recording_metadata or {}
+                error_metadata.update({
+                    "transcoding_status": "failed",
+                    "transcoding_error": f"Queue connection error: {str(e)}",
+                    "can_retry": True
+                })
+                db_recording.recording_metadata = error_metadata
+                db.commit()
+            except Exception as db_error:
+                logger.error(f"Additionally failed to update error status: {str(db_error)}")
+            
+            # Return a more user-friendly error
+            return {
+                "stream_url": stream_url,
+                "format": "hls", 
+                "mime_type": "application/vnd.apple.mpegurl",
+                "status": "queue_error",
+                "error": "Processing system temporarily unavailable",
+                "retry_url": f"/recordings/retry-processing/{recording_id}",
+                "message": "The video processing system is temporarily unavailable. Please try again later."
+            }
         
     except HTTPException:
         # Re-raise HTTP exceptions to preserve their status code and detail
@@ -471,24 +595,6 @@ async def get_recording_info(
         logger.error(f"Error getting recording info for {recording_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-def store_recording(video_data, video_id):
-    """
-    Store video with appropriate lifecycle configuration
-    """
-    s3_client = boto3.client('s3')
-    
-    # Store in Standard tier initially
-    s3_client.put_object(
-        Bucket='your-drone-video-storage',
-        Key=f'videos/{video_id}.mp4',
-        Body=video_data,
-        StorageClass='STANDARD'
-    )
-    
-    # Set lifecycle policy (this would be done once during bucket setup)
-    # After 30 days, move to STANDARD_IA
-    # After 90 days, move to GLACIER if not accessed
-
 def convert_to_streaming_formats(input_path, video_id):
     """
     Convert video to MP4 (if needed) and create adaptive bitrate versions
@@ -539,48 +645,6 @@ def convert_to_streaming_formats(input_path, video_id):
     ])
     
     return output_dir 
-
-@router.post("/", response_model=schemas.Recording)
-def create_recording(
-    recording: schemas.RecordingCreate,
-    db: Session = Depends(database.get_db),
-    current_user: User = Depends(auth_service.get_current_user)
-):
-    """Process a recording to create HLS streaming format"""
-    db_recording = crud.get_recording(db, recording_id=recording.id, user_id=current_user.id)
-    if db_recording is None:
-        raise HTTPException(status_code=404, detail="Recording not found")
-    
-    # Get the file path
-    if db_recording.environment == "local":
-        # Ensure file_path is relative to /recordings directory
-        file_path = db_recording.file_path
-        if not file_path.startswith('/recordings/'):
-            file_path = os.path.join('/recordings', os.path.basename(file_path))
-            
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=404, detail="Recording file not found")
-        
-        # Process the file
-        try:
-            output_dir = convert_to_streaming_formats(file_path, recording.id)
-            
-            # Update recording metadata
-            metadata = db_recording.recording_metadata or {}
-            metadata["processed"] = True
-            metadata["hls_path"] = output_dir
-            metadata["processed_at"] = datetime.now().isoformat()
-            
-            # Update the recording in the database
-            db_recording = crud.update_recording_metadata(db, recording.id, metadata)
-            
-            return {"status": "success", "message": "Recording processed successfully", "output_dir": output_dir}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error processing recording: {str(e)}")
-    else:
-        # For AWS recordings, we would need to download from S3 first, process, then upload back
-        # This is more complex and would require temporary storage
-        raise HTTPException(status_code=400, detail="Processing AWS recordings is not supported yet")
 
 @router.get("/debug-player/{recording_id}")
 async def get_debug_video_player(recording_id: int, db: Session = Depends(database.get_db)):
@@ -941,4 +1005,128 @@ async def get_recording_status(
         raise
     except Exception as e:
         logger.error(f"Error getting recording status: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) 
+
+@router.get("/{recording_id}/processing-status")
+async def get_recording_processing_status(
+    recording_id: int,
+    db: Session = Depends(database.get_db),
+    current_user: User = Depends(auth_service.get_current_user)
+) -> Dict[str, Any]:
+    """
+    Get the current processing status of a recording without creating a new job.
+    This is useful for the frontend to poll for status updates.
+    
+    Args:
+        recording_id: ID of the recording to check
+        
+    Returns:
+        Current status information
+    """
+    try:
+        # Get recording from database
+        db_recording = crud.get_recording(db, recording_id=recording_id)
+        if db_recording is None:
+            raise HTTPException(status_code=404, detail="Recording not found")
+            
+        # Check if the recording belongs to the current user
+        if db_recording.user_id != current_user.id:
+            # Check if user has access through device association
+            stream_name = db_recording.stream_name
+            user_devices = db.query(Device).filter(
+                Device.users.any(id=current_user.id),
+                Device.is_active == True,
+                Device.stream_key == stream_name
+            ).first()
+            
+            if not user_devices and db_recording.recording_metadata and "stream_id" in db_recording.recording_metadata:
+                stream_id = db_recording.recording_metadata["stream_id"]
+                user_devices = db.query(Device).filter(
+                    Device.users.any(id=current_user.id),
+                    Device.is_active == True,
+                    Device.stream_key == stream_id
+                ).first()
+                
+            if not user_devices:
+                raise HTTPException(status_code=403, detail="You do not have permission to access this recording")
+        
+        # Check if there's a ready HLS version
+        if (db_recording.recording_metadata and 
+            "hls_path" in db_recording.recording_metadata and 
+            os.path.exists(os.path.join(db_recording.recording_metadata.get("hls_path", ""), "playlist.m3u8"))):
+            
+            # Check if transcoding is completed
+            if (db_recording.recording_metadata.get("transcoding_status") == "completed" or
+                db_recording.recording_metadata.get("processed", False) == True):
+                
+                return {
+                    "recording_id": recording_id,
+                    "status": "ready",
+                    "hls_path": db_recording.recording_metadata.get("hls_path"),
+                    "completed_at": db_recording.recording_metadata.get("transcoding_completed_at"),
+                    "video_info": db_recording.recording_metadata.get("video_info", {})
+                }
+                
+        # Check for processing task
+        try:
+            from app.services.video_processor import check_task_exists
+            existing_task = await check_task_exists(recording_id)
+            
+            if existing_task:
+                # Translate Celery task status to our status format
+                status_map = {
+                    "PENDING": "queued",
+                    "STARTED": "processing",
+                    "PROGRESS": "processing",
+                    "SUCCESS": "completed",
+                    "FAILURE": "failed",
+                    "REVOKED": "cancelled"
+                }
+                
+                client_status = status_map.get(existing_task["status"], "unknown")
+                
+                response = {
+                    "recording_id": recording_id,
+                    "status": client_status,
+                    "task_id": existing_task["task_id"],
+                    "celery_status": existing_task["status"]
+                }
+                
+                # Add error message if failed
+                if client_status == "failed" and "error" in existing_task:
+                    response["error"] = existing_task["error"]
+                    
+                return response
+        except Exception as e:
+            logger.error(f"Error checking task status: {str(e)}")
+        
+        # If we reach here, check the database metadata 
+        if db_recording.recording_metadata and "transcoding_status" in db_recording.recording_metadata:
+            status = db_recording.recording_metadata["transcoding_status"]
+            
+            response = {
+                "recording_id": recording_id,
+                "status": status,
+                "started_at": db_recording.recording_metadata.get("transcoding_started_at"),
+                "completed_at": db_recording.recording_metadata.get("transcoding_completed_at")
+            }
+            
+            # Add error message if failed
+            if status == "failed" and "transcoding_error" in db_recording.recording_metadata:
+                response["error"] = db_recording.recording_metadata["transcoding_error"]
+                response["can_retry"] = True
+                
+            return response
+            
+        # If we reach here, the recording hasn't been processed yet
+        return {
+            "recording_id": recording_id,
+            "status": "not_processed",
+            "message": "This recording has not been processed yet"
+        }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting recording processing status: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e)) 

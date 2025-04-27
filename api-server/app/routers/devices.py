@@ -30,14 +30,25 @@ async def create_device(
     db_device = Device(
         name=device.name,
         stream_key=generate_stream_key(),
-        user_id=current_user.id
+        is_active=True
     )
     
     try:
+        # Add device to db
         db.add(db_device)
+        db.flush()
+        
+        # Add relationship to current user
+        db_device.users.append(current_user)
+        
         db.commit()
         db.refresh(db_device)
-        return db_device
+        
+        # Construct response
+        response = dict(db_device.__dict__)
+        response["user_id"] = current_user.id  # For schema compatibility
+        
+        return response
     except IntegrityError:
         db.rollback()
         raise HTTPException(
@@ -54,14 +65,21 @@ async def get_devices(
 ):
     """Get all devices for the authenticated user."""
     devices = db.query(Device).filter(
-        Device.user_id == current_user.id
+        Device.users.contains(current_user)
     ).offset(skip).limit(limit).all()
     
     total_count = db.query(Device).filter(
-        Device.user_id == current_user.id
+        Device.users.contains(current_user)
     ).count()
     
-    return DeviceList(devices=devices, count=total_count)
+    # Add user_id for schema compatibility
+    device_list = []
+    for device in devices:
+        device_dict = dict(device.__dict__)
+        device_dict["user_id"] = current_user.id
+        device_list.append(device_dict)
+    
+    return DeviceList(devices=device_list, count=total_count)
 
 @router.get("/{device_id}", response_model=DeviceSchema)
 async def get_device(
@@ -72,7 +90,7 @@ async def get_device(
     """Get a specific device by ID."""
     device = db.query(Device).filter(
         Device.id == device_id,
-        Device.user_id == current_user.id
+        Device.users.contains(current_user)
     ).first()
     
     if not device:
@@ -80,7 +98,12 @@ async def get_device(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Device not found"
         )
-    return device
+    
+    # Add user_id for schema compatibility
+    response = dict(device.__dict__)
+    response["user_id"] = current_user.id
+    
+    return response
 
 @router.put("/{device_id}", response_model=DeviceSchema)
 async def update_device(
@@ -92,7 +115,7 @@ async def update_device(
     """Update a device."""
     device = db.query(Device).filter(
         Device.id == device_id,
-        Device.user_id == current_user.id
+        Device.users.contains(current_user)
     ).first()
     
     if not device:
@@ -107,7 +130,12 @@ async def update_device(
     try:
         db.commit()
         db.refresh(device)
-        return device
+        
+        # Add user_id for schema compatibility
+        response = dict(device.__dict__)
+        response["user_id"] = current_user.id
+        
+        return response
     except IntegrityError:
         db.rollback()
         raise HTTPException(
@@ -124,7 +152,7 @@ async def delete_device(
     """Delete a device. Admin only."""
     device = db.query(Device).filter(
         Device.id == device_id,
-        Device.user_id == current_user.id
+        Device.users.contains(current_user)
     ).first()
     
     if not device:
@@ -133,6 +161,11 @@ async def delete_device(
             detail="Device not found"
         )
     
+    # Remove device from all related users
+    device.users = []
+    
+    # Delete the device
     db.delete(device)
     db.commit()
+    
     return {"message": "Device deleted successfully"} 

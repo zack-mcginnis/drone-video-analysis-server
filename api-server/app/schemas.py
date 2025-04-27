@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 class RecordingBase(BaseModel):
@@ -24,7 +24,7 @@ class Recording(RecordingBase):
         orm_mode = True
 
 class RecordingList(BaseModel):
-    recordings: list[Recording]
+    recordings: List[Recording]
     count: int
 
 class DeviceBase(BaseModel):
@@ -44,11 +44,13 @@ class Device(DeviceBase):
     updated_at: datetime
     last_seen_at: Optional[datetime]
     is_active: bool
-    user_id: int
+    user_id: int  # For backward compatibility with existing clients
 
     class Config:
         orm_mode = True
+        # Enable arbitrary_types_allowed to support SQLAlchemy objects and dict conversion
+        arbitrary_types_allowed = True
 
 class DeviceList(BaseModel):
-    devices: list[Device]
+    devices: List[Device]
     count: int 

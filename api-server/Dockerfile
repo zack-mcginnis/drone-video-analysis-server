@@ -104,7 +104,7 @@ nginx -s stop 2>/dev/null || true\n\
 nginx\n\
 \n\
 # Start uvicorn\n\
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000\n\
+exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4\n\
 ' > /app/start.sh && chmod +x /app/start.sh
 
 # Command to run both nginx and uvicorn

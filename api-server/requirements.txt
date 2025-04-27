@@ -11,3 +11,6 @@ requests==2.31.0
 python-jose[cryptography]==3.3.0
 httpx==0.24.0
 asyncio==3.4.3
+celery>=5.2.3
+redis>=4.2.2
+sqlalchemy-utils==0.41.1

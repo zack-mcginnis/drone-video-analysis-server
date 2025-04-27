@@ -105,26 +105,47 @@ async def post_login(
     """
     logger.info(f"Post-login called with auth0_id: {user_info.auth0_id}, email: {user_info.email}")
     
-    try:
-        # Check if user exists
-        user = db.query(models.User).filter(models.User.auth0_id == user_info.auth0_id).first()
+    # Check if user exists by auth0_id
+    user = db.query(models.User).filter(models.User.auth0_id == user_info.auth0_id).first()
+    
+    if user:
+        logger.info(f"Found existing user with id: {user.id}")
+        return user
+    
+    # If not found by auth0_id, check by email as fallback
+    user = db.query(models.User).filter(models.User.email == user_info.email).first()
+    if user:
+        # User found by email but not auth0_id - this should be rare
+        # This might happen if auth0_id was changed or migrated
+        logger.info(f"Found user by email with id: {user.id}, updating auth0_id")
+        user.auth0_id = user_info.auth0_id
+        db.commit()
+        db.refresh(user)
+        return user
         
-        if user:
-            logger.info(f"Found existing user with id: {user.id}")
-            return user
-            
-        logger.info("User not found, creating new user")
-        # Create new user
-        user = models.User(
-            email=user_info.email,
-            auth0_id=user_info.auth0_id,
-            is_active=True
-        )
-        
-        db.add(user)
-        logger.info("Added new user to session")
-        
+    # User not found - implement retry logic for creation
+    max_retries = 3
+    retry_count = 0
+    
+    while retry_count < max_retries:
         try:
+            # Check one more time in case user was created in another request
+            user = db.query(models.User).filter(models.User.auth0_id == user_info.auth0_id).first()
+            if user:
+                logger.info(f"User was created by another process, found with id: {user.id}")
+                return user
+                
+            logger.info("User not found, creating new user")
+            # Create new user
+            user = models.User(
+                email=user_info.email,
+                auth0_id=user_info.auth0_id,
+                is_active=True
+            )
+            
+            db.add(user)
+            logger.info("Added new user to session")
+            
             db.flush()  # Flush to get the user ID
             logger.info(f"Flushed session, got user id: {user.id}")
             
@@ -149,16 +170,23 @@ async def post_login(
             return user
             
         except Exception as e:
+            retry_count += 1
             db.rollback()
-            logger.error(f"Database error while creating user: {str(e)}", exc_info=True)
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to create user: {str(e)}"
-            )
+            logger.warning(f"Attempt {retry_count} failed to create user: {str(e)}")
             
-    except Exception as e:
-        logger.error(f"Unexpected error in post-login: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail="An unexpected error occurred"
-        ) 
+            if retry_count >= max_retries:
+                logger.error(f"Database error while creating user: {str(e)}", exc_info=True)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to create user: {str(e)}"
+                )
+                
+            # Small delay to prevent immediate retry
+            import asyncio
+            await asyncio.sleep(0.2)
+            
+            # After waiting, check if another process created the user
+            user = db.query(models.User).filter(models.User.auth0_id == user_info.auth0_id).first()
+            if user:
+                logger.info(f"User was created by another process during retry, found with id: {user.id}")
+                return user 

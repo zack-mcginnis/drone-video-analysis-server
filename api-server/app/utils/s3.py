@@ -182,38 +182,6 @@ def download_from_s3(s3_path: str, local_path: str) -> bool:
                 pass
         return False
 
-def get_object_from_s3(s3_path: str) -> Optional[BinaryIO]:
-    """
-    Get an object from S3 bucket using direct access.
-    
-    Args:
-        s3_path: Path in format bucket-name/object-key
-        
-    Returns:
-        Object body or None if error
-    """
-    try:
-        bucket_name, object_key = parse_s3_path(s3_path)
-        s3_client = get_s3_client()
-        
-        try:
-            # Get the object directly using the S3 client
-            response = s3_client.get_object(
-                Bucket=bucket_name,
-                Key=object_key
-            )
-            return response['Body']
-            
-        except ClientError as e:
-            error_code = e.response.get('Error', {}).get('Code', '')
-            error_msg = e.response.get('Error', {}).get('Message', '')
-            logger.error(f"S3 client error: {error_code} - {error_msg}")
-            return None
-            
-    except Exception as e:
-        logger.error(f"Error getting object from S3: {str(e)}")
-        return None
-
 def parse_s3_path(s3_path: str) -> Tuple[str, str]:
     """
     Parse an S3 path into bucket name and object key.

@@ -41,22 +41,38 @@ else:
     # Use explicit TCP connection for local development
     SQLALCHEMY_DATABASE_URL = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
 
-# Create SQLAlchemy engine with connection debugging and TCP-specific settings
+# Connection pool size configuration
+POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "20"))
+MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "30"))
+POOL_RECYCLE = int(os.getenv("DB_POOL_RECYCLE", "3600"))
+POOL_TIMEOUT = int(os.getenv("DB_POOL_TIMEOUT", "30"))
+
+# Create SQLAlchemy engine with optimized connection pooling and TCP-specific settings
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
-    echo=True,  # Enable SQL logging
+    echo=os.getenv("SQL_ECHO", "false").lower() == "true",  # Only enable SQL logging when explicitly set
     pool_pre_ping=True,  # Enable connection health checks
+    pool_size=POOL_SIZE,  # Number of connections to keep open
+    max_overflow=MAX_OVERFLOW,  # Allow creating more connections when under load
+    pool_recycle=POOL_RECYCLE,  # Recycle connections after 1 hour
+    pool_timeout=POOL_TIMEOUT,  # Time to wait for a connection from pool
     connect_args={
         "application_name": "api-server",  # Helps identify connections in pg_stat_activity
         "keepalives": 1,
         "keepalives_idle": 30,
         "keepalives_interval": 10,
-        "keepalives_count": 5
+        "keepalives_count": 5,
+        "options": "-c statement_timeout=30000"  # 30s statement timeout to prevent long-running queries
     }
 )
 
-# Create SessionLocal class
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# Create SessionLocal class with optimized settings
+SessionLocal = sessionmaker(
+    autocommit=False, 
+    autoflush=False, 
+    bind=engine,
+    expire_on_commit=False  # Improve performance by not expiring objects after commit
+)
 
 # Create Base class
 Base = declarative_base()

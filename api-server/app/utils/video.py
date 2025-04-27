@@ -123,29 +123,6 @@ def get_video_info(file_path: str) -> dict:
         logger.error(f"Error getting video info: {str(e)}")
         return {}
 
-def convert_flv_to_mp4(input_file: str, output_file: str) -> bool:
-    """
-    Convert an FLV file to MP4.
-    
-    Args:
-        input_file: Path to the input FLV file
-        output_file: Path to the output MP4 file
-        
-    Returns:
-        True if conversion was successful, False otherwise
-    """
-    try:
-        (
-            ffmpeg
-            .input(input_file)
-            .output(output_file, codec='copy')
-            .run(quiet=True, overwrite_output=True)
-        )
-        return True
-    except Exception as e:
-        logger.error(f"Error converting FLV to MP4: {str(e)}")
-        return False
-
 def process_video_for_streaming(input_file: str, output_dir: str) -> Tuple[str, dict]:
     """
     Process a video file for streaming by converting to HLS format.
