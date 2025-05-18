@@ -129,6 +129,9 @@ ssh -i "$RTMP_SSH_KEY_PATH" "$SSH_USER@$RTMP_PUBLIC_IP" << EOF
         -p 1935:1935 \
         -p 80:80 \
         -p 8080:8080 \
+        --log-driver json-file \
+        --log-opt max-size=10m \
+        --log-opt max-file=3 \
         -e ENVIRONMENT=aws \
         -e AWS_REGION=$AWS_REGION \
         -e S3_BUCKET=$S3_BUCKET \
@@ -165,6 +168,7 @@ export AUTH0_AUDIENCE="${AUTH0_AUDIENCE}"
 export AUTH0_CLIENT_ID="${AUTH0_CLIENT_ID}"
 export AUTH0_CLIENT_SECRET="${AUTH0_CLIENT_SECRET}"
 export RTMP_SERVER_URL="http://${RTMP_PUBLIC_IP}:8080"
+export TEMP_TOKEN_SECRET="${TEMP_TOKEN_SECRET}"
 EOF
 
 # Copy the env file to the remote host
@@ -234,6 +238,9 @@ ERROR_OUTPUT=$(ssh -i "$API_SSH_KEY_PATH" -o ConnectTimeout=30 -o ServerAliveInt
         --name redis-container \
         --network app-network \
         -p 6379:6379 \
+        --log-driver json-file \
+        --log-opt max-size=10m \
+        --log-opt max-file=3 \
         redis:7-alpine \
         redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --loglevel verbose
 
@@ -242,6 +249,9 @@ ERROR_OUTPUT=$(ssh -i "$API_SSH_KEY_PATH" -o ConnectTimeout=30 -o ServerAliveInt
         --network app-network \
         -p 80:80 \
         -p 8000:8000 \
+        --log-driver json-file \
+        --log-opt max-size=10m \
+        --log-opt max-file=3 \
         -e ENVIRONMENT=aws \
         -e AWS_REGION="${AWS_REGION}" \
         -e AWS_DEFAULT_REGION="${AWS_REGION}" \
@@ -267,6 +277,7 @@ ERROR_OUTPUT=$(ssh -i "$API_SSH_KEY_PATH" -o ConnectTimeout=30 -o ServerAliveInt
         -e REDIS_MAX_RETRIES=10 \
         -e REDIS_RETRY_DELAY=1.0 \
         -e TEMP_TOKEN_SECRET="${TEMP_TOKEN_SECRET}" \
+        -e PYTHONUNBUFFERED=1 \
         api-server || {
             echo "Failed to start API server container"
             exit 1
@@ -277,6 +288,9 @@ ERROR_OUTPUT=$(ssh -i "$API_SSH_KEY_PATH" -o ConnectTimeout=30 -o ServerAliveInt
     docker run -d --restart always \
         --name celery-worker-container \
         --network app-network \
+        --log-driver json-file \
+        --log-opt max-size=10m \
+        --log-opt max-file=3 \
         -e ENVIRONMENT=aws \
         -e POSTGRES_HOST="${POSTGRES_HOST}" \
         -e POSTGRES_PORT="${POSTGRES_PORT}" \

@@ -573,11 +573,11 @@ async def get_hls_file(
                 from urllib.parse import unquote
                 decoded_token = unquote(token)
                 logger.info(f"Decoded token: {decoded_token}")
-                
+
                 # Log the temp token secret being used
                 secret_preview = auth_service.temp_token_secret[:10] + "..." if auth_service.temp_token_secret else None
                 logger.info(f"Using temp token secret (preview): {secret_preview}")
-                
+
                 # Verify token and get user_id
                 payload = auth_service.verify_temporary_token(decoded_token)
                 logger.info(f"Token payload: {payload}")

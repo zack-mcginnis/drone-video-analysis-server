@@ -297,14 +297,34 @@ def process_recording_task(self, recording_id: int):
         
         # Update the recording in the database
         try:
+            # Explicitly refresh the recording from DB to ensure we have latest state
+            db.refresh(db_recording)
+            
+            # Log the current metadata for debugging
+            logger.info(f"Current metadata before update: {db_recording.recording_metadata}")
+            
+            # Update metadata field and merge changes
             db_recording.recording_metadata = metadata
+            db.add(db_recording)
+            db.flush()
+            
+            # Verify metadata was updated before commit
+            db.refresh(db_recording)
+            logger.info(f"Metadata after update, before commit: {db_recording.recording_metadata}")
+            
+            # Commit the transaction
             db.commit()
+            
+            # Verify the update after commit
+            db.refresh(db_recording)
+            logger.info(f"Final metadata after commit: {db_recording.recording_metadata}")
+            
             logger.info(f"Successfully processed recording {recording_id} for HLS streaming")
             
             # Return success result with video info
             return {
-                "recording_id": recording_id, 
-                "status": "completed",
+                "recording_id": recording_id,
+                "status": "completed", 
                 "hls_path": hls_output_dir,
                 "video_info": video_info
             }
