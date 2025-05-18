@@ -15,10 +15,29 @@ from alembic.runtime import migration
 from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response
+import sys
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Configure logging to output to stdout with a more straightforward configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ],
+    force=True  # Force reconfiguration of the root logger
+)
+
+# Create logger for this module
+logger = logging.getLogger("api")
+# Set the log level for this logger
+logger.setLevel(logging.INFO)
+# Ensure all handlers propagate logs to stdout
+for handler in logging.root.handlers:
+    if isinstance(handler, logging.StreamHandler) and handler.stream == sys.stdout:
+        logger.addHandler(handler)
 
 def wait_for_db(max_retries=30, retry_interval=1):
     """Wait for the database to be ready with exponential backoff"""
@@ -73,6 +92,98 @@ async def lifespan(app: FastAPI):
         raise
     yield
 
+# Add request logging middleware
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """Middleware for logging request/response details and error messages"""
+    async def dispatch(self, request: Request, call_next):
+        start_time = time.time()
+        
+        # Log directly to stdout in addition to logger
+        print(f"API REQUEST: {request.method} {request.url.path}")
+        
+        # Get the real client IP from X-Forwarded-For if available
+        client_host = request.headers.get("x-forwarded-for", request.client.host)
+        # Get query parameters if any
+        query_params = dict(request.query_params)
+        query_str = f" - Query: {query_params}" if query_params else ""
+        
+        # Log request with more details
+        log_message = (
+            f">>> Request: {request.method} {request.url.path}{query_str} "
+            f"- Client: {client_host}"
+        )
+        logger.info(log_message)
+        print(log_message)  # Direct stdout logging as backup
+        
+        try:
+            # Process request and get response
+            response = await call_next(request)
+            
+            # Calculate processing time
+            process_time = time.time() - start_time
+            
+            # Check if it's an error response (4xx or 5xx status code)
+            if response.status_code >= 400:
+                # For error responses, try to capture the response body
+                response_body = b""
+                async for chunk in response.body_iterator:
+                    response_body += chunk
+                
+                # Try to decode the response body
+                try:
+                    body_text = response_body.decode()
+                except UnicodeDecodeError:
+                    body_text = "[Binary response body]"
+                
+                # Log error response with body content
+                log_response = (
+                    f"<<< Error Response: {request.method} {request.url.path} "
+                    f"- Status: {response.status_code} "
+                    f"- Time: {process_time:.3f}s "
+                    f"- Body: {body_text}"
+                )
+                logger.error(log_response)
+                print(log_response)  # Direct stdout logging as backup
+                
+                # Create a new response with the same body
+                return Response(
+                    content=response_body,
+                    status_code=response.status_code,
+                    headers=dict(response.headers),
+                    media_type=response.media_type
+                )
+            else:
+                # Log successful response
+                log_response = (
+                    f"<<< Response: {request.method} {request.url.path} "
+                    f"- Status: {response.status_code} "
+                    f"- Time: {process_time:.3f}s"
+                )
+                logger.info(log_response)
+                print(log_response)  # Direct stdout logging as backup
+            
+            return response
+            
+        except Exception as e:
+            # Log error response
+            process_time = time.time() - start_time
+            log_error = (
+                f"!!! Error: {request.method} {request.url.path} "
+                f"- Error: {str(e)} "
+                f"- Type: {type(e).__name__} "
+                f"- Time: {process_time:.3f}s"
+            )
+            logger.error(log_error)
+            print(log_error)  # Direct stdout logging as backup
+            
+            # Log exception details for debugging
+            import traceback
+            error_traceback = traceback.format_exc()
+            logger.error(f"Traceback: {error_traceback}")
+            print(f"Traceback: {error_traceback}")  # Direct stdout logging as backup
+            
+            raise
+
 # Create FastAPI app
 app = FastAPI(
     title="RTMP Recording API",
@@ -80,6 +191,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# Add request logging middleware
+app.add_middleware(RequestLoggingMiddleware)
 
 # Configure CORS
 # Configure CORS only for local development
@@ -105,54 +219,3 @@ def read_root():
 @app.get("/health")
 def health_check():
     return {"status": "healthy"}
-
-@app.get("/videos/{video_id}/stream")
-def get_video_stream(video_id: str):
-    # Check if the video exists in S3
-    s3_client = boto3.client('s3')
-    try:
-        # First check for HLS playlist
-        s3_client.head_object(
-            Bucket=os.getenv("S3_BUCKET"),
-            Key=f'videos/{video_id}/playlist.m3u8'
-        )
-        
-        # If HLS playlist exists, return the HLS URL
-        if os.getenv("CLOUDFRONT_DOMAIN"):
-            cloudfront_domain = os.getenv("CLOUDFRONT_DOMAIN")
-            stream_url = f"https://{cloudfront_domain}/videos/{video_id}/playlist.m3u8"
-        else:
-            # Fallback to direct S3 URL
-            region = os.getenv("AWS_REGION", "us-east-1")
-            bucket = os.getenv("S3_BUCKET")
-            stream_url = f"https://{bucket}.s3.{region}.amazonaws.com/videos/{video_id}/playlist.m3u8"
-        
-        return {
-            "stream_url": stream_url,
-            "format": "hls",
-            "mime_type": "application/vnd.apple.mpegurl"
-        }
-    except:
-        # If HLS playlist doesn't exist, check for direct video file
-        try:
-            s3_client.head_object(
-                Bucket=os.getenv("S3_BUCKET"),
-                Key=f'videos/{video_id}.mp4'
-            )
-            
-            # Return direct video URL
-            if os.getenv("CLOUDFRONT_DOMAIN"):
-                cloudfront_domain = os.getenv("CLOUDFRONT_DOMAIN")
-                stream_url = f"https://{cloudfront_domain}/videos/{video_id}.mp4"
-            else:
-                region = os.getenv("AWS_REGION", "us-east-1")
-                bucket = os.getenv("S3_BUCKET")
-                stream_url = f"https://{bucket}.s3.{region}.amazonaws.com/videos/{video_id}.mp4"
-            
-            return {
-                "stream_url": stream_url,
-                "format": "mp4",
-                "mime_type": "video/mp4"
-            }
-        except:
-            raise HTTPException(status_code=404, detail="Video not found") 

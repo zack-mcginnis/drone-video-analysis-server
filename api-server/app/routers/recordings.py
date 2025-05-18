@@ -247,16 +247,17 @@ async def stream_recording(
     Stream a recording using HLS.
     
     Args:
-        recording_id: ID of the recording to stream
+        recording_id: ID of the recording
         request: FastAPI request object
         background_tasks: FastAPI background tasks
         db: Database session
+        current_user: Current authenticated user
     
     Returns:
         Dictionary containing stream URL and video information
     """
     try:
-        # Get recording from database without user_id check
+        # Get recording from database
         db_recording = crud.get_recording(db, recording_id=recording_id)
         if db_recording is None:
             logger.error(f"Recording not found with ID: {recording_id}")
@@ -300,7 +301,23 @@ async def stream_recording(
         os.makedirs(HLS_DIR, exist_ok=True)
         hls_output_dir = os.path.join(HLS_DIR, str(recording_id))
         base_url = str(request.base_url).rstrip('/')
-        stream_url = f"{base_url}/recordings/hls/{recording_id}/playlist.m3u8"
+        
+        # Generate a signed token for HLS access
+        logger.info(f"Creating token for user {current_user.id}")
+        secret_preview = auth_service.temp_token_secret[:10] + "..." if auth_service.temp_token_secret else None
+        logger.info(f"Using temp token secret (preview): {secret_preview}")
+
+        token = auth_service.create_temporary_token(
+            data={"user_id": current_user.id},
+            expires_delta=timedelta(hours=12)  # Token valid for 12 hours
+        )
+        logger.info(f"Created token: {token}")
+
+        # URL encode the token to ensure it's properly transmitted
+        from urllib.parse import quote
+        encoded_token = quote(token)
+        logger.info(f"Encoded token: {encoded_token}")
+        stream_url = f"{base_url}/recordings/hls/{recording_id}/playlist.m3u8?token={encoded_token}"
 
         # First check if we already have a ready HLS version
         if (db_recording.recording_metadata and 
@@ -521,18 +538,103 @@ async def stream_recording(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/hls/{recording_id}/{file_name}")
-async def get_hls_file(recording_id: str, file_name: str):
+async def get_hls_file(
+    recording_id: str, 
+    file_name: str,
+    token: Optional[str] = None,
+    db: Session = Depends(database.get_db)
+):
     """
     Serve HLS playlist and segment files.
+    Uses a signed token for authentication instead of requiring user authentication for each request.
+    This allows for better caching and compatibility with video players.
     
     Args:
         recording_id: ID of the recording
         file_name: Name of the HLS file to serve
+        token: Optional signed token for authentication
+        db: Database session
     
     Returns:
         FileResponse containing the requested HLS file
     """
     try:
+        # For playlist requests, verify the token
+        if file_name == "playlist.m3u8":
+            if not token:
+                logger.error(f"No token provided for playlist request: recording {recording_id}")
+                raise HTTPException(status_code=401, detail="Authentication required")
+                
+            try:
+                # Log the received token
+                logger.info(f"Received token: {token}")
+                
+                # URL decode the token
+                from urllib.parse import unquote
+                decoded_token = unquote(token)
+                logger.info(f"Decoded token: {decoded_token}")
+                
+                # Log the temp token secret being used
+                secret_preview = auth_service.temp_token_secret[:10] + "..." if auth_service.temp_token_secret else None
+                logger.info(f"Using temp token secret (preview): {secret_preview}")
+                
+                # Verify token and get user_id
+                payload = auth_service.verify_temporary_token(decoded_token)
+                logger.info(f"Token payload: {payload}")
+                
+                user_id = payload.get("user_id")
+                if not user_id:
+                    logger.error(f"No user_id in token payload for recording {recording_id}")
+                    raise ValueError("No user_id in token")
+                    
+                logger.info(f"Token verified successfully for user {user_id}, recording {recording_id}")
+                
+            except Exception as e:
+                logger.error(f"Token verification failed for recording {recording_id}. Error: {str(e)}", exc_info=True)
+                raise HTTPException(status_code=401, detail="Invalid authentication token")
+                
+            # Get recording from database
+            db_recording = crud.get_recording(db, recording_id=int(recording_id))
+            if db_recording is None:
+                logger.error(f"Recording {recording_id} not found")
+                raise HTTPException(status_code=404, detail="Recording not found")
+                
+            # Check if user has access to this recording
+            if db_recording.user_id != user_id:
+                # Check if user has access through device association
+                stream_name = db_recording.stream_name
+                user_devices = db.query(Device).filter(
+                    Device.users.any(id=user_id),
+                    Device.is_active == True,
+                    Device.stream_key == stream_name
+                ).first()
+                
+                if not user_devices and db_recording.recording_metadata and "stream_id" in db_recording.recording_metadata:
+                    stream_id = db_recording.recording_metadata["stream_id"]
+                    user_devices = db.query(Device).filter(
+                        Device.users.any(id=user_id),
+                        Device.is_active == True,
+                        Device.stream_key == stream_id
+                    ).first()
+                    
+                if not user_devices:
+                    logger.error(f"User {user_id} does not have access to recording {recording_id}")
+                    raise HTTPException(status_code=403, detail="You do not have permission to access this recording")
+                    
+            # Check if HLS processing is complete
+            if not (db_recording.recording_metadata and 
+                    (db_recording.recording_metadata.get("transcoding_status") == "completed" or
+                     db_recording.recording_metadata.get("processed", False) == True)):
+                logger.error(f"Recording {recording_id} HLS processing not complete")
+                raise HTTPException(status_code=400, detail="Recording HLS processing not complete")
+        else:
+            # For segment requests (.ts files), we don't verify the token
+            # This is safe because:
+            # 1. Segment names are hard to guess
+            # 2. Segments are meaningless without the playlist
+            # 3. This allows for better caching
+            pass
+            
         file_path = os.path.join(HLS_DIR, recording_id, file_name)
         
         if not os.path.exists(file_path):
@@ -542,15 +644,34 @@ async def get_hls_file(recording_id: str, file_name: str):
         # Set content type based on file extension
         content_type = "application/vnd.apple.mpegurl" if file_name.endswith('.m3u8') else "video/mp2t"
         
-        return FileResponse(
+        # Ensure the file path is within the HLS directory (security check)
+        abs_hls_dir = os.path.abspath(HLS_DIR)
+        abs_file_path = os.path.abspath(file_path)
+        if not abs_file_path.startswith(abs_hls_dir):
+            logger.error(f"Invalid file path: {file_path}")
+            raise HTTPException(status_code=400, detail="Invalid file path")
+        
+        response = FileResponse(
             path=file_path,
             media_type=content_type,
             filename=file_name
         )
         
+        # Add caching headers for better performance
+        if file_name.endswith('.ts'):
+            # Cache segments for 1 year (they are immutable)
+            response.headers["Cache-Control"] = "public, max-age=31536000"
+        else:
+            # Don't cache playlists
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            
+        return response
+        
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error serving HLS file {file_name} for recording {recording_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error while serving HLS file")
 
 @router.get("/{recording_id}/info")
 async def get_recording_info(

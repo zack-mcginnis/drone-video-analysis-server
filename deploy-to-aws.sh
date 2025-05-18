@@ -44,8 +44,9 @@ fi
 setup_docker() {
     local ip=$1
     local key_path=$2
+    local remote_user=$3
     echo "Setting up Docker on instance $ip..."
-    ssh -i "$key_path" -o StrictHostKeyChecking=no $SSH_USER@$ip << 'SETUP_EOF'
+    ssh -i "$key_path" -o StrictHostKeyChecking=no $remote_user@$ip << SETUP_EOF
         if grep -q "Amazon Linux 2023" /etc/os-release; then
             echo "Detected Amazon Linux 2023"
             if ! command -v docker &> /dev/null; then
@@ -54,10 +55,15 @@ setup_docker() {
                 sudo dnf install -y docker
                 sudo systemctl enable docker.service
                 sudo systemctl start docker.service
-                sudo usermod -aG docker $USER
+                sudo usermod -aG docker \$(whoami)
                 echo "Docker installed successfully."
             else
                 echo "Docker already installed."
+                # Ensure Docker is running and user has proper permissions
+                sudo systemctl restart docker.service
+                sudo usermod -aG docker \$(whoami)
+                # Verify Docker is running5d681821afb4
+                sudo systemctl status docker.service
             fi
         else
             echo "Detected Amazon Linux 2"
@@ -67,13 +73,20 @@ setup_docker() {
                 sudo amazon-linux-extras install docker -y
                 sudo service docker start
                 sudo systemctl enable docker
-                sudo usermod -a -G docker $USER
+                sudo usermod -a -G docker \$(whoami)
                 echo "Docker installed successfully."
             else
                 echo "Docker already installed."
+                # Ensure Docker is running and user has proper permissions
+                sudo service docker restart
+                sudo usermod -a -G docker \$(whoami)
+                # Verify Docker is running
+                sudo service docker status
             fi
         fi
-        mkdir -p ~/drone-rtmp-project
+        # Create project directory and set permissions
+        sudo mkdir -p ~/drone-rtmp-project
+        sudo chown -R \$(whoami):\$(whoami) ~/drone-rtmp-project
 SETUP_EOF
 }
 
@@ -92,8 +105,8 @@ tar -czf rtmp-project.tar.gz -C $TEMP_DIR rtmp-server
 tar -czf api-project.tar.gz -C $TEMP_DIR api-server
 
 # Setup Docker on both instances
-setup_docker $RTMP_PUBLIC_IP $RTMP_SSH_KEY_PATH
-setup_docker $API_PUBLIC_IP $API_SSH_KEY_PATH
+setup_docker $RTMP_PUBLIC_IP $RTMP_SSH_KEY_PATH $SSH_USER
+setup_docker $API_PUBLIC_IP $API_SSH_KEY_PATH $SSH_USER
 
 # Deploy RTMP Server
 echo "Deploying RTMP server to $RTMP_PUBLIC_IP..."
@@ -128,14 +141,54 @@ EOF
 
 # Deploy API Server with error handling
 echo "Deploying API server to $API_PUBLIC_IP..."
-ERROR_OUTPUT=$(scp -i "$API_SSH_KEY_PATH" -o ConnectTimeout=10 api-project.tar.gz "$SSH_USER@$API_PUBLIC_IP:~/api-project.tar.gz" 2>&1) || {
+ERROR_OUTPUT=$(scp -i "$API_SSH_KEY_PATH" -o ConnectTimeout=30 -o ServerAliveInterval=60 -o ServerAliveCountMax=3 api-project.tar.gz "$SSH_USER@$API_PUBLIC_IP:~/api-project.tar.gz" 2>&1) || {
     echo "ERROR: Failed to copy API project files"
     echo "Error output: $ERROR_OUTPUT"
     exit 1
 }
 
-ERROR_OUTPUT=$(ssh -i "$API_SSH_KEY_PATH" -o ConnectTimeout=10 "$SSH_USER@$API_PUBLIC_IP" << EOF
+# Create a temporary env file for the remote host
+cat > remote_env.sh << EOF
+export POSTGRES_HOST="${POSTGRES_HOST}"
+export POSTGRES_PORT="${POSTGRES_PORT}"
+export POSTGRES_DB="${POSTGRES_DB}"
+export POSTGRES_USER="${POSTGRES_USER}"
+export POSTGRES_PASSWORD="${POSTGRES_PASSWORD}"
+export AWS_REGION="${AWS_REGION}"
+export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}"
+export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}"
+export S3_BUCKET="${S3_BUCKET}"
+export USE_LIGHTSAIL_BUCKET="${USE_LIGHTSAIL_BUCKET}"
+export CLOUDFRONT_DOMAIN="${CLOUDFRONT_DOMAIN}"
+export AUTH0_DOMAIN="${AUTH0_DOMAIN}"
+export AUTH0_AUDIENCE="${AUTH0_AUDIENCE}"
+export AUTH0_CLIENT_ID="${AUTH0_CLIENT_ID}"
+export AUTH0_CLIENT_SECRET="${AUTH0_CLIENT_SECRET}"
+export RTMP_SERVER_URL="http://${RTMP_PUBLIC_IP}:8080"
+EOF
+
+# Copy the env file to the remote host
+ERROR_OUTPUT=$(scp -i "$API_SSH_KEY_PATH" -o ConnectTimeout=30 -o ServerAliveInterval=60 -o ServerAliveCountMax=3 remote_env.sh "$SSH_USER@$API_PUBLIC_IP:~/remote_env.sh" 2>&1) || {
+    echo "ERROR: Failed to copy environment file"
+    echo "Error output: $ERROR_OUTPUT"
+    rm remote_env.sh
+    exit 1
+}
+
+# Remove the local env file
+rm remote_env.sh
+
+ERROR_OUTPUT=$(ssh -i "$API_SSH_KEY_PATH" -o ConnectTimeout=30 -o ServerAliveInterval=60 -o ServerAliveCountMax=3 "$SSH_USER@$API_PUBLIC_IP" << 'EOF'
     set -e
+    # Source the environment variables
+    source ~/remote_env.sh
+    rm ~/remote_env.sh
+
+    # Ensure Docker is running
+    sudo systemctl restart docker.service || sudo service docker restart
+    sudo usermod -aG docker $(whoami)
+    # Re-login to apply group changes
+    exec sg docker -c '
     mkdir -p ~/drone-rtmp-project
     tar -xzf api-project.tar.gz -C ~/drone-rtmp-project || {
         echo "Failed to extract API project files"
@@ -145,14 +198,24 @@ ERROR_OUTPUT=$(ssh -i "$API_SSH_KEY_PATH" -o ConnectTimeout=10 "$SSH_USER@$API_P
     cd ~/drone-rtmp-project/api-server
     
     echo "Building API server image..."
-    sudo docker build -t api-server . || {
+    docker build -t api-server . || {
         echo "Failed to build API server image"
         exit 1
     }
     
     echo "Stopping and removing existing container if it exists..."
-    sudo docker stop api-server-container 2>/dev/null || true
-    sudo docker rm api-server-container 2>/dev/null || true
+    docker stop api-server-container 2>/dev/null || true
+    docker rm api-server-container 2>/dev/null || true
+
+    # Stop and remove Redis container if it exists
+    echo "Stopping and removing Redis container if it exists..."
+    docker stop redis-container 2>/dev/null || true
+    docker rm redis-container 2>/dev/null || true
+
+    # Stop and remove Celery worker container if it exists
+    echo "Stopping and removing Celery worker container if it exists..."
+    docker stop celery-worker-container 2>/dev/null || true
+    docker rm celery-worker-container 2>/dev/null || true
     
     echo "Deploying API server..."
     echo "Using PostgreSQL configuration:"
@@ -161,8 +224,22 @@ ERROR_OUTPUT=$(ssh -i "$API_SSH_KEY_PATH" -o ConnectTimeout=10 "$SSH_USER@$API_P
     echo "Database: ${POSTGRES_DB}"
     echo "User: ${POSTGRES_USER}"
 
-    sudo docker run -d --restart always \
+    # Create Docker network first
+    echo "Creating Docker network..."
+    docker network create app-network 2>/dev/null || true
+
+    # Start Redis container first
+    echo "Starting Redis container..."
+    docker run -d --restart always \
+        --name redis-container \
+        --network app-network \
+        -p 6379:6379 \
+        redis:7-alpine \
+        redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --loglevel verbose
+
+    docker run -d --restart always \
         --name api-server-container \
+        --network app-network \
         -p 80:80 \
         -p 8000:8000 \
         -e ENVIRONMENT=aws \
@@ -183,66 +260,116 @@ ERROR_OUTPUT=$(ssh -i "$API_SSH_KEY_PATH" -o ConnectTimeout=10 "$SSH_USER@$API_P
         -e AUTH0_CLIENT_ID="${AUTH0_CLIENT_ID}" \
         -e AUTH0_CLIENT_SECRET="${AUTH0_CLIENT_SECRET}" \
         -e RTMP_SERVER_URL="http://${RTMP_PUBLIC_IP}:8080" \
+        -e REDIS_URL="redis://redis-container:6379/0" \
+        -e REDIS_SOCKET_TIMEOUT=30 \
+        -e REDIS_SOCKET_CONNECT_TIMEOUT=30 \
+        -e REDIS_RETRY_ON_TIMEOUT=true \
+        -e REDIS_MAX_RETRIES=10 \
+        -e REDIS_RETRY_DELAY=1.0 \
+        -e TEMP_TOKEN_SECRET="${TEMP_TOKEN_SECRET}" \
         api-server || {
             echo "Failed to start API server container"
             exit 1
         }
 
-    # Enhanced container health check
+    # Start Celery worker container
+    echo "Starting Celery worker container..."
+    docker run -d --restart always \
+        --name celery-worker-container \
+        --network app-network \
+        -e ENVIRONMENT=aws \
+        -e POSTGRES_HOST="${POSTGRES_HOST}" \
+        -e POSTGRES_PORT="${POSTGRES_PORT}" \
+        -e POSTGRES_DB="${POSTGRES_DB}" \
+        -e POSTGRES_USER="${POSTGRES_USER}" \
+        -e POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
+        -e REDIS_URL="redis://redis-container:6379/0" \
+        -e CELERY_CONCURRENCY=2 \
+        -e PYTHONPATH=/app \
+        -e REDIS_SOCKET_TIMEOUT=30 \
+        -e REDIS_SOCKET_CONNECT_TIMEOUT=30 \
+        -e REDIS_RETRY_ON_TIMEOUT=true \
+        -e REDIS_MAX_RETRIES=10 \
+        -e REDIS_RETRY_DELAY=1.0 \
+        -e AWS_REGION="${AWS_REGION}" \
+        -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
+        -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
+        -e S3_BUCKET="${S3_BUCKET}" \
+        -e USE_LIGHTSAIL_BUCKET="${USE_LIGHTSAIL_BUCKET}" \
+        api-server \
+        celery -A app.services.video_processor.celery_app worker \
+        --loglevel=info \
+        --concurrency=2 \
+        -Q video_processing \
+        --without-gossip \
+        --without-mingle \
+        --without-heartbeat
+
+    # Enhanced container health check with retries
     echo "Verifying container health..."
-    sleep 10  # Give the container more time to fully initialize
+    max_retries=5
+    retry_count=0
     
-    echo "Checking database connection..."
-    if ! sudo docker exec api-server-container python3 -c "
-import os
-print('Database configuration:')
-host = os.getenv('POSTGRES_HOST')
-port = os.getenv('POSTGRES_PORT')
-db = os.getenv('POSTGRES_DB')
-user = os.getenv('POSTGRES_USER')
-print(f'Host: {host}, Port: {port}')
-print(f'Database: {db}')
-print(f'User: {user}')
-
-# Test database connection
-from sqlalchemy import create_engine, text
-from urllib.parse import quote_plus
-
-password = quote_plus(os.getenv('POSTGRES_PASSWORD', ''))
-connection_string = f'postgresql://{user}:{password}@{host}:{port}/{db}'
-engine = create_engine(connection_string)
-
-# Try to connect
-with engine.connect() as connection:
-    result = connection.execute(text('SELECT 1')).scalar()
-    print(f'Database connection successful: {result == 1}')
-"; then
-        echo "Error: Failed to check database configuration"
+    while [ $retry_count -lt $max_retries ]; do
+        sleep 10  # Give containers time to initialize
+        
+        # Check if containers are running and get their logs if they are not
+        if ! docker ps | grep -q api-server-container; then
+            echo "Error: API server container is not running"
+            echo "API server container logs:"
+            docker logs api-server-container 2>&1
+            retry_count=$((retry_count + 1))
+            continue
+        fi
+        
+        if ! docker ps | grep -q redis-container; then
+            echo "Error: Redis container is not running"
+            echo "Redis container logs:"
+            docker logs redis-container 2>&1
+            retry_count=$((retry_count + 1))
+            continue
+        fi
+        
+        if ! docker ps | grep -q celery-worker-container; then
+            echo "Error: Celery worker container is not running"
+            echo "Celery worker container logs:"
+            docker logs celery-worker-container 2>&1
+            retry_count=$((retry_count + 1))
+            continue
+        fi
+        
+        # All containers are running
+        break
+    done
+    
+    if [ $retry_count -eq $max_retries ]; then
+        echo "Error: Failed to start all containers after $max_retries attempts"
+        echo "Final container status:"
+        docker ps -a
+        echo "Container logs:"
+        echo "API server container logs:"
+        docker logs api-server-container 2>&1
+        echo "Redis container logs:"
+        docker logs redis-container 2>&1
+        echo "Celery worker container logs:"
+        docker logs celery-worker-container 2>&1
         exit 1
     fi
-
-    if ! sudo docker ps | grep -q api-server-container; then
-        echo "Error: Container is not running"
-        exit 1
-    fi
-
-    # Check container status
-    CONTAINER_STATUS=\$(sudo docker inspect --format='{{.State.Status}}' api-server-container)
-    if [ "\$CONTAINER_STATUS" != "running" ]; then
-        echo "Error: Container is in \$CONTAINER_STATUS state"
-        exit 1
-    fi
-
+    
+    echo "All containers are running successfully"
+    
     # Run migrations with enhanced error handling
     echo "Running database migrations..."
-    if ! sudo docker exec api-server-container bash -c "cd /app && python scripts/run_migrations.py"; then
+    if ! docker exec api-server-container bash -c "cd /app && python scripts/run_migrations.py"; then
         echo "Error: Database migrations failed"
+        docker logs api-server-container
         exit 1
     fi
 
     echo "Migrations completed successfully"
     echo "Final container status:"
-    sudo docker ps | grep api-server-container
+    docker ps | grep -E "api-server-container|redis-container|celery-worker-container"
+    '
 EOF
 ) || {
     echo "ERROR: Failed to deploy API server"

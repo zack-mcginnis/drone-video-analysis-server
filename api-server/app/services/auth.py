@@ -1,6 +1,6 @@
 from typing import Optional
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from jose import jwt, JWTError
 from fastapi import HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import User
 import logging
+import secrets
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,8 @@ class AuthService:
         # Get Auth0 Management API credentials from environment
         self.client_id = os.getenv("AUTH0_CLIENT_ID")
         self.client_secret = os.getenv("AUTH0_CLIENT_SECRET")
+        # Secret key for temporary tokens
+        self.temp_token_secret = os.getenv("TEMP_TOKEN_SECRET", secrets.token_urlsafe(32))
 
     async def get_jwks(self) -> dict:
         if self._jwks is None:
@@ -94,7 +97,6 @@ class AuthService:
         db: Session = Depends(get_db)
     ) -> User:
         
-        print("Getting current user")
         token = credentials.credentials
         payload = await self.verify_token(token)
         
@@ -187,5 +189,129 @@ class AuthService:
             )
             
         return user
+
+    def create_temporary_token(self, data: dict, expires_delta: timedelta) -> str:
+        """
+        Create a temporary JWT token for internal use (like HLS streaming).
+        This token is NOT an Auth0 token and is only valid for internal services.
+        
+        Args:
+            data: Dictionary of data to include in the token
+            expires_delta: How long the token should be valid for
+            
+        Returns:
+            JWT token string
+        """
+        try:
+            to_encode = data.copy()
+            expire = datetime.utcnow() + expires_delta
+            to_encode.update({"exp": expire})
+            
+            logger.debug(f"Creating temporary token with data: {to_encode}")
+            
+            encoded_jwt = jwt.encode(
+                to_encode,
+                self.temp_token_secret,
+                algorithm="HS256"  # Use HS256 for temporary tokens
+            )
+            
+            logger.debug("Successfully created temporary token")
+            return encoded_jwt
+            
+        except Exception as e:
+            logger.error(f"Error creating temporary token: {str(e)}")
+            raise
+        
+    def verify_temporary_token(self, token: str) -> dict:
+        """
+        Verify a temporary token created by create_temporary_token.
+        
+        Args:
+            token: The JWT token to verify
+            
+        Returns:
+            Dictionary of decoded token data
+            
+        Raises:
+            HTTPException if token is invalid
+        """
+        if not token:
+            logger.error("No token provided")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="No token provided",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            
+        if not self.temp_token_secret:
+            logger.error("No temporary token secret configured")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Token verification not configured",
+            )
+            
+        try:
+            logger.info(f"Verifying token: {token}")
+            logger.info(f"Using secret (preview): {self.temp_token_secret[:10]}...")
+            
+            # First try to decode without verification to check structure
+            try:
+                unverified_header = jwt.get_unverified_header(token)
+                logger.info(f"Token header: {unverified_header}")
+                if unverified_header.get("alg") != "HS256":
+                    raise ValueError(f"Invalid algorithm: {unverified_header.get('alg')}")
+            except Exception as e:
+                logger.error(f"Invalid token header: {str(e)}")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid token format",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            
+            # Now verify the token
+            payload = jwt.decode(
+                token,
+                self.temp_token_secret,
+                algorithms=["HS256"]
+            )
+            
+            logger.info(f"Token payload: {payload}")
+            
+            # Verify required claims
+            if "user_id" not in payload:
+                raise ValueError("Missing user_id claim")
+            if "exp" not in payload:
+                raise ValueError("Missing exp claim")
+                
+            return payload
+            
+        except jwt.ExpiredSignatureError:
+            logger.error("Token has expired")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token has expired",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        except jwt.JWTError as e:
+            logger.error(f"JWT verification failed: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token signature",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        except ValueError as e:
+            logger.error(f"Invalid token claims: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=str(e),
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error verifying token: {str(e)}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid authentication token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
 auth_service = AuthService() 

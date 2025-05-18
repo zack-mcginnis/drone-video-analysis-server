@@ -92,6 +92,10 @@ server {\n\
 # Test nginx configuration
 RUN nginx -t
 
+# Configure Nginx logging to stdout/stderr
+RUN ln -sf /dev/stdout /var/log/nginx/access.log && \
+    ln -sf /dev/stderr /var/log/nginx/error.log
+
 # Expose ports
 EXPOSE 80 8000
 
@@ -100,11 +104,19 @@ RUN echo '#!/bin/bash\n\
 # Ensure nginx is not running\n\
 nginx -s stop 2>/dev/null || true\n\
 \n\
-# Start nginx\n\
-nginx\n\
+# Start nginx in daemon mode with access and error logs going to stdout/stderr\n\
+nginx -g "daemon off;" &\n\
 \n\
-# Start uvicorn\n\
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4\n\
+# Start uvicorn with proper logging configuration\n\
+exec uvicorn app.main:app \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --workers 4 \
+    --log-level info \
+    --access-log \
+    --use-colors \
+    --proxy-headers \
+    --forwarded-allow-ips="*"\n\
 ' > /app/start.sh && chmod +x /app/start.sh
 
 # Command to run both nginx and uvicorn
