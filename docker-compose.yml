@@ -58,20 +58,12 @@ services:
       - AUTH0_CLIENT_ID=${AUTH0_CLIENT_ID}
       - AUTH0_CLIENT_SECRET=${AUTH0_CLIENT_SECRET}
       - AUTH0_AUDIENCE=${AUTH0_AUDIENCE}
-      - REDIS_URL=redis://redis:6379/0
       - DB_POOL_SIZE=20
       - DB_MAX_OVERFLOW=30
       - SQL_ECHO=false
-      - REDIS_SOCKET_TIMEOUT=30
-      - REDIS_SOCKET_CONNECT_TIMEOUT=30
-      - REDIS_RETRY_ON_TIMEOUT=true
-      - REDIS_MAX_RETRIES=10
-      - REDIS_RETRY_DELAY=1.0
       - TEMP_TOKEN_SECRET=${TEMP_TOKEN_SECRET}
       - PYTHONUNBUFFERED=1
     depends_on:
-      redis:
-        condition: service_healthy
       db:
         condition: service_started
     networks:
@@ -89,81 +81,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-
-  celery-worker:
-    build:
-      context: ./api-server
-      dockerfile: Dockerfile
-    image: drone-api-server
-    working_dir: /app
-    command: /app/celery_worker.sh
-    volumes:
-      - ./api-server:/app
-      - ./api-server/celery_worker.sh:/app/celery_worker.sh
-      - ./recordings:/recordings
-    environment:
-      - ENVIRONMENT=local
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_HOST=db
-      - POSTGRES_DB=recordings
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_CONCURRENCY=2
-      - PYTHONPATH=/app
-      - REDIS_SOCKET_TIMEOUT=30
-      - REDIS_SOCKET_CONNECT_TIMEOUT=30
-      - REDIS_RETRY_ON_TIMEOUT=true
-      - REDIS_MAX_RETRIES=10
-      - REDIS_RETRY_DELAY=1.0
-    depends_on:
-      redis:
-        condition: service_healthy
-      db:
-        condition: service_started
-    restart: unless-stopped
-    networks:
-      app-network:
-        aliases:
-          - celery-worker
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: '2G'
-
-  redis:
-    image: redis:7-alpine
-    container_name: drone-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    restart: unless-stopped
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --loglevel verbose
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    networks:
-      app-network:
-        aliases:
-          - redis
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 512M
 
   db:
     image: postgres:13
@@ -185,7 +102,6 @@ services:
 
 volumes:
   postgres_data:
-  redis-data:
 
 networks:
   app-network:

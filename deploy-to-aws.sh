@@ -211,71 +211,32 @@ ERROR_OUTPUT=$(ssh -i "$API_SSH_KEY_PATH" -o ConnectTimeout=30 -o ServerAliveInt
     docker stop api-server-container 2>/dev/null || true
     docker rm api-server-container 2>/dev/null || true
 
-    # Stop and remove Redis container if it exists
-    echo "Stopping and removing Redis container if it exists..."
-    docker stop redis-container 2>/dev/null || true
-    docker rm redis-container 2>/dev/null || true
 
-    # Stop and remove Celery worker container if it exists
-    echo "Stopping and removing Celery worker container if it exists..."
-    docker stop celery-worker-container 2>/dev/null || true
-    docker rm celery-worker-container 2>/dev/null || true
-    
-    echo "Deploying API server..."
-    echo "Using PostgreSQL configuration:"
-    echo "Host: ${POSTGRES_HOST}"
-    echo "Port: ${POSTGRES_PORT}"
-    echo "Database: ${POSTGRES_DB}"
-    echo "User: ${POSTGRES_USER}"
-
-    # Create Docker network first
-    echo "Creating Docker network..."
-    docker network create app-network 2>/dev/null || true
-
-    # Start Redis container first
-    echo "Starting Redis container..."
-    docker run -d --restart always \
-        --name redis-container \
-        --network app-network \
-        -p 6379:6379 \
-        --log-driver json-file \
-        --log-opt max-size=10m \
-        --log-opt max-file=3 \
-        redis:7-alpine \
-        redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --loglevel verbose
 
     docker run -d --restart always \
         --name api-server-container \
-        --network app-network \
         -p 80:80 \
         -p 8000:8000 \
         --log-driver json-file \
         --log-opt max-size=10m \
         --log-opt max-file=3 \
         -e ENVIRONMENT=aws \
-        -e AWS_REGION="${AWS_REGION}" \
-        -e AWS_DEFAULT_REGION="${AWS_REGION}" \
-        -e S3_BUCKET="${S3_BUCKET}" \
-        -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
-        -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
-        -e USE_LIGHTSAIL_BUCKET="${USE_LIGHTSAIL_BUCKET}" \
-        -e CLOUDFRONT_DOMAIN="${CLOUDFRONT_DOMAIN}" \
         -e POSTGRES_HOST="${POSTGRES_HOST}" \
         -e POSTGRES_PORT="${POSTGRES_PORT}" \
         -e POSTGRES_DB="${POSTGRES_DB}" \
         -e POSTGRES_USER="${POSTGRES_USER}" \
         -e POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
+        -e AWS_REGION="${AWS_REGION}" \
+        -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
+        -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
+        -e AWS_BUCKET_NAME="${S3_BUCKET}" \
+        -e USE_LIGHTSAIL_BUCKET="${USE_LIGHTSAIL_BUCKET}" \
+        -e CLOUDFRONT_DOMAIN="${CLOUDFRONT_DOMAIN}" \
         -e AUTH0_DOMAIN="${AUTH0_DOMAIN}" \
         -e AUTH0_AUDIENCE="${AUTH0_AUDIENCE}" \
         -e AUTH0_CLIENT_ID="${AUTH0_CLIENT_ID}" \
         -e AUTH0_CLIENT_SECRET="${AUTH0_CLIENT_SECRET}" \
         -e RTMP_SERVER_URL="http://${RTMP_PUBLIC_IP}:8080" \
-        -e REDIS_URL="redis://redis-container:6379/0" \
-        -e REDIS_SOCKET_TIMEOUT=30 \
-        -e REDIS_SOCKET_CONNECT_TIMEOUT=30 \
-        -e REDIS_RETRY_ON_TIMEOUT=true \
-        -e REDIS_MAX_RETRIES=10 \
-        -e REDIS_RETRY_DELAY=1.0 \
         -e TEMP_TOKEN_SECRET="${TEMP_TOKEN_SECRET}" \
         -e PYTHONUNBUFFERED=1 \
         api-server || {
@@ -283,106 +244,14 @@ ERROR_OUTPUT=$(ssh -i "$API_SSH_KEY_PATH" -o ConnectTimeout=30 -o ServerAliveInt
             exit 1
         }
 
-    # Start Celery worker container
-    echo "Starting Celery worker container..."
-    docker run -d --restart always \
-        --name celery-worker-container \
-        --network app-network \
-        --log-driver json-file \
-        --log-opt max-size=10m \
-        --log-opt max-file=3 \
-        -e ENVIRONMENT=aws \
-        -e POSTGRES_HOST="${POSTGRES_HOST}" \
-        -e POSTGRES_PORT="${POSTGRES_PORT}" \
-        -e POSTGRES_DB="${POSTGRES_DB}" \
-        -e POSTGRES_USER="${POSTGRES_USER}" \
-        -e POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
-        -e REDIS_URL="redis://redis-container:6379/0" \
-        -e CELERY_CONCURRENCY=2 \
-        -e PYTHONPATH=/app \
-        -e REDIS_SOCKET_TIMEOUT=30 \
-        -e REDIS_SOCKET_CONNECT_TIMEOUT=30 \
-        -e REDIS_RETRY_ON_TIMEOUT=true \
-        -e REDIS_MAX_RETRIES=10 \
-        -e REDIS_RETRY_DELAY=1.0 \
-        -e AWS_REGION="${AWS_REGION}" \
-        -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
-        -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
-        -e S3_BUCKET="${S3_BUCKET}" \
-        -e USE_LIGHTSAIL_BUCKET="${USE_LIGHTSAIL_BUCKET}" \
-        api-server \
-        celery -A app.services.video_processor.celery_app worker \
-        --loglevel=info \
-        --concurrency=2 \
-        -Q video_processing \
-        --without-gossip \
-        --without-mingle \
-        --without-heartbeat
-
-    # Enhanced container health check with retries
-    echo "Verifying container health..."
-    max_retries=5
-    retry_count=0
-    
-    while [ $retry_count -lt $max_retries ]; do
-        sleep 10  # Give containers time to initialize
-        
-        # Check if containers are running and get their logs if they are not
-        if ! docker ps | grep -q api-server-container; then
-            echo "Error: API server container is not running"
-            echo "API server container logs:"
-            docker logs api-server-container 2>&1
-            retry_count=$((retry_count + 1))
-            continue
-        fi
-        
-        if ! docker ps | grep -q redis-container; then
-            echo "Error: Redis container is not running"
-            echo "Redis container logs:"
-            docker logs redis-container 2>&1
-            retry_count=$((retry_count + 1))
-            continue
-        fi
-        
-        if ! docker ps | grep -q celery-worker-container; then
-            echo "Error: Celery worker container is not running"
-            echo "Celery worker container logs:"
-            docker logs celery-worker-container 2>&1
-            retry_count=$((retry_count + 1))
-            continue
-        fi
-        
-        # All containers are running
-        break
-    done
-    
-    if [ $retry_count -eq $max_retries ]; then
-        echo "Error: Failed to start all containers after $max_retries attempts"
-        echo "Final container status:"
-        docker ps -a
-        echo "Container logs:"
+    # Check if containers are running
+    echo "Checking if containers are running..."
+    if ! docker ps | grep -q api-server-container; then
+        echo "Error: API server container is not running"
         echo "API server container logs:"
         docker logs api-server-container 2>&1
-        echo "Redis container logs:"
-        docker logs redis-container 2>&1
-        echo "Celery worker container logs:"
-        docker logs celery-worker-container 2>&1
         exit 1
     fi
-    
-    echo "All containers are running successfully"
-    
-    # Run migrations with enhanced error handling
-    echo "Running database migrations..."
-    if ! docker exec api-server-container bash -c "cd /app && python scripts/run_migrations.py"; then
-        echo "Error: Database migrations failed"
-        docker logs api-server-container
-        exit 1
-    fi
-
-    echo "Migrations completed successfully"
-    echo "Final container status:"
-    docker ps | grep -E "api-server-container|redis-container|celery-worker-container"
     '
 EOF
 ) || {

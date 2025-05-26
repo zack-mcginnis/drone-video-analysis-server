@@ -227,3 +227,57 @@ def upload_to_s3(local_path: str, s3_path: str) -> bool:
     except Exception as e:
         logger.error(f"Error uploading to S3 bucket: {str(e)}")
         return False
+
+def get_s3_hls_file_url(s3_path: str, file_name: str, expiration: int = 3600) -> Optional[str]:
+    """
+    Generate a pre-signed URL for an HLS-related file (playlist.m3u8 or .ts segments).
+    Sets the appropriate content type based on file extension.
+    
+    Args:
+        s3_path: Base S3 path in format bucket-name/object-key-prefix (without file name)
+        file_name: Name of the HLS file (playlist.m3u8 or segment_xxx.ts)
+        expiration: URL expiration time in seconds (default 1 hour)
+        
+    Returns:
+        Pre-signed URL or None if error
+    """
+    try:
+        # Determine content type based on file extension
+        content_type = "application/vnd.apple.mpegurl" if file_name.endswith('.m3u8') else "video/mp2t"
+        
+        # Combine path and filename
+        full_path = f"{s3_path}/{file_name}"
+        if full_path.startswith("s3://"):
+            full_path = full_path[5:]
+
+        bucket_name, object_key = parse_s3_path(full_path)
+        s3_client = get_s3_client()
+        
+        # Common parameters for pre-signed URL
+        params = {
+            'Bucket': bucket_name,
+            'Key': object_key,
+            'ResponseContentType': content_type
+        }
+        
+        try:
+            # Generate the pre-signed URL
+            url = s3_client.generate_presigned_url(
+                'get_object',
+                Params=params,
+                ExpiresIn=expiration,
+                HttpMethod='GET'
+            )
+            
+            logger.info(f"Generated pre-signed URL for HLS file: {file_name}")
+            return url
+            
+        except ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code', '')
+            error_msg = e.response.get('Error', {}).get('Message', '')
+            logger.error(f"Failed to generate pre-signed URL for HLS file: {error_code} - {error_msg}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error generating pre-signed URL for HLS file: {str(e)}")
+        return None

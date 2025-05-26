@@ -17,8 +17,10 @@ class Recording(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     stream_name = Column(String(255), nullable=False, index=True)
-    file_path = Column(String(1024), nullable=False)
-    s3_path = Column(String(1024), nullable=True)
+    local_mp4_path = Column(String(1024), nullable=True)
+    s3_mp4_path = Column(String(1024), nullable=True)
+    local_hls_path = Column(String(1024), nullable=True)
+    s3_hls_path = Column(String(1024), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     file_size = Column(BigInteger, nullable=True)

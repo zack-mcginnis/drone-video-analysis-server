@@ -4,8 +4,10 @@ from datetime import datetime
 
 class RecordingBase(BaseModel):
     stream_name: str
-    file_path: str
-    s3_path: Optional[str] = None
+    local_mp4_path: Optional[str] = None
+    s3_mp4_path: Optional[str] = None
+    local_hls_path: Optional[str] = None
+    s3_hls_path: Optional[str] = None
     file_size: Optional[int] = None
     duration: Optional[int] = None
     environment: str

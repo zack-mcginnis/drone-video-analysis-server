@@ -190,22 +190,25 @@ class AuthService:
             
         return user
 
-    def create_temporary_token(self, data: dict, expires_delta: timedelta) -> str:
+    def create_temporary_token(self, data: dict, expires_delta: Optional[timedelta]) -> str:
         """
         Create a temporary JWT token for internal use (like HLS streaming).
         This token is NOT an Auth0 token and is only valid for internal services.
         
         Args:
             data: Dictionary of data to include in the token
-            expires_delta: How long the token should be valid for
+            expires_delta: How long the token should be valid for, or None to use data's own exp
             
         Returns:
             JWT token string
         """
         try:
             to_encode = data.copy()
-            expire = datetime.utcnow() + expires_delta
-            to_encode.update({"exp": expire})
+            
+            # Only add expiration if expires_delta is provided and data doesn't already have an exp
+            if expires_delta is not None and "exp" not in to_encode:
+                expire = datetime.utcnow() + expires_delta
+                to_encode.update({"exp": expire})
             
             logger.debug(f"Creating temporary token with data: {to_encode}")
             

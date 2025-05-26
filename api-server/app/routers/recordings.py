@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request
 from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse, JSONResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
@@ -13,12 +13,14 @@ import tempfile
 from pathlib import Path
 import logging
 import requests
+import time
+import urllib.parse
 from app.models import User, Device
 
 from ..utils.video import process_video_for_streaming, get_video_info
-from ..utils.s3 import get_s3_client, generate_presigned_url, download_from_s3
+from ..utils.s3 import get_s3_client, generate_presigned_url, download_from_s3, get_s3_hls_file_url
 from app.services.auth import auth_service
-from app.services.video_processor import submit_processing_job
+from app.services.video_processor import check_task_exists
 
 load_dotenv()
 
@@ -60,7 +62,7 @@ async def process_recording_background(recording_id: int, db: Session):
         # Process based on environment
         if db_recording.environment == "local":
             # Handle local file
-            file_path = db_recording.file_path
+            file_path = db_recording.local_mp4_path
             if not file_path.startswith('/recordings/'):
                 file_path = os.path.join(RECORDINGS_DIR, os.path.basename(file_path))
             
@@ -81,12 +83,12 @@ async def process_recording_background(recording_id: int, db: Session):
                 
         else:
             # Handle AWS S3 file
-            if not db_recording.s3_path:
+            if not db_recording.s3_mp4_path:
                 logger.error(f"Recording does not have an S3 path: {recording_id}")
                 update_transcoding_status(db, db_recording, "failed", "Recording does not have an S3 path")
                 return
                 
-            s3_path = db_recording.s3_path
+            s3_path = db_recording.s3_mp4_path
             if s3_path.startswith("s3://"):
                 s3_path = s3_path[5:]
                 
@@ -226,8 +228,8 @@ def delete_recording(
         raise HTTPException(status_code=404, detail="Recording not found")
     
     # Delete the recording file if it exists
-    if db_recording.file_path and os.path.exists(db_recording.file_path):
-        os.remove(db_recording.file_path)
+    if db_recording.local_mp4_path and os.path.exists(db_recording.local_mp4_path):
+        os.remove(db_recording.local_mp4_path)
     
     # Delete the recording from the database
     db.delete(db_recording)
@@ -239,299 +241,94 @@ def delete_recording(
 async def stream_recording(
     recording_id: int, 
     request: Request, 
-    background_tasks: BackgroundTasks,
     db: Session = Depends(database.get_db),
     current_user: User = Depends(auth_service.get_current_user)
 ) -> Dict[str, Any]:
     """
-    Stream a recording using HLS.
+    Stream a recording using HLS. Assumes HLS files are already available.
     
     Args:
         recording_id: ID of the recording
         request: FastAPI request object
-        background_tasks: FastAPI background tasks
         db: Database session
-        current_user: Current authenticated user
-    
+        current_user: Authenticated user
+        
     Returns:
-        Dictionary containing stream URL and video information
+        Dict with stream URL for the recording
     """
     try:
-        # Get recording from database
-        db_recording = crud.get_recording(db, recording_id=recording_id)
+        # Get recording metadata from database
+        db_recording = crud.get_recording(db, recording_id)
         if db_recording is None:
-            logger.error(f"Recording not found with ID: {recording_id}")
             raise HTTPException(status_code=404, detail="Recording not found")
-
-        # Check if the recording belongs to the current user
-        if db_recording.user_id == current_user.id:
-            logger.info(f"User {current_user.id} is the owner of recording {recording_id}")
-            # User is the owner, allow access
-            pass
-        else:
+            
+        # Check if user has access to this recording
+        if db_recording.user_id != current_user.id:
             # Check if user has access through device association
             stream_name = db_recording.stream_name
-            logger.info(f"Checking device access for user {current_user.id}, recording {recording_id}, stream {stream_name}")
-            
-            # Try to find device using stream_key
             user_devices = db.query(Device).filter(
                 Device.users.any(id=current_user.id),
                 Device.is_active == True,
                 Device.stream_key == stream_name
             ).first()
-
+                
             if not user_devices:
-                # If not found by stream_key, check if recording metadata has stream_id
-                if db_recording.recording_metadata and "stream_id" in db_recording.recording_metadata:
-                    stream_id = db_recording.recording_metadata["stream_id"]
-                    logger.info(f"Checking access using stream_id from metadata: {stream_id}")
-                    
-                    # Check if any device for this user has a matching stream_key
-                    user_devices = db.query(Device).filter(
-                        Device.users.any(id=current_user.id),
-                        Device.is_active == True,
-                        Device.stream_key == stream_id
-                    ).first()
-            
-            if not user_devices:
-                logger.error(f"User {current_user.id} does not have access to recording {recording_id} with stream {stream_name}")
+                logger.error(f"User {current_user.id} does not have access to recording {recording_id}")
                 raise HTTPException(status_code=403, detail="You do not have permission to access this recording")
-
-        # Ensure HLS directory exists
-        os.makedirs(HLS_DIR, exist_ok=True)
-        hls_output_dir = os.path.join(HLS_DIR, str(recording_id))
-        base_url = str(request.base_url).rstrip('/')
-        
-        # Generate a signed token for HLS access
-        logger.info(f"Creating token for user {current_user.id}")
-        secret_preview = auth_service.temp_token_secret[:10] + "..." if auth_service.temp_token_secret else None
-        logger.info(f"Using temp token secret (preview): {secret_preview}")
-
+                
+        # Generate a JWT token for the playlist
         token = auth_service.create_temporary_token(
-            data={"user_id": current_user.id},
-            expires_delta=timedelta(hours=12)  # Token valid for 12 hours
+            data={"user_id": current_user.id, "exp": int(time.time()) + 36000},
+            expires_delta=None  # We handle expiry in the data
         )
-        logger.info(f"Created token: {token}")
-
-        # URL encode the token to ensure it's properly transmitted
-        from urllib.parse import quote
-        encoded_token = quote(token)
-        logger.info(f"Encoded token: {encoded_token}")
+        encoded_token = urllib.parse.quote(token, safe='')
+        
+        # Get the base URL from the request
+        base_url = str(request.base_url)
+        base_url = base_url.rstrip('/')
+        
+        # Generate the stream URL with authentication token
         stream_url = f"{base_url}/recordings/hls/{recording_id}/playlist.m3u8?token={encoded_token}"
-
-        # First check if we already have a ready HLS version
-        if (db_recording.recording_metadata and 
-            "hls_path" in db_recording.recording_metadata and 
-            os.path.exists(os.path.join(db_recording.recording_metadata.get("hls_path", ""), "playlist.m3u8"))):
-            
-            logger.info(f"Found existing HLS version for recording {recording_id}")
-            
-            # Check if transcoding is completed
-            if (db_recording.recording_metadata.get("transcoding_status") == "completed" or
-                db_recording.recording_metadata.get("processed", False) == True):
-                
-                video_info = db_recording.recording_metadata.get("video_info", {})
-                return {
-                    "stream_url": stream_url,
-                    "format": "hls",
-                    "mime_type": "application/vnd.apple.mpegurl",
-                    "video_info": video_info,
-                    "status": "ready"
-                }
-                
-            # If transcoding failed, return error status
-            elif db_recording.recording_metadata.get("transcoding_status") == "failed":
-                error_msg = db_recording.recording_metadata.get("transcoding_error", "Unknown error")
-                return {
-                    "status": "failed",
-                    "error": error_msg,
-                    "message": f"Processing failed: {error_msg}",
-                    "can_retry": True,
-                    "retry_url": f"/recordings/retry-processing/{recording_id}"
-                }
         
-        # If the recording hasn't been processed or if the processing is incomplete, 
-        # check the processing status in the task queue and database
-        
-        # Check if there's an existing task for this recording
-        try:
-            # Get task status from Celery
-            from app.services.video_processor import check_task_exists
-            existing_task = await check_task_exists(recording_id)
+        # Check for AWS environment with S3 HLS path
+        if db_recording.environment == "aws" and db_recording.s3_hls_path:
+            logger.info(f"Using S3 HLS path for recording {recording_id}: {db_recording.s3_hls_path}")
             
-            if existing_task:
-                logger.info(f"Found existing task for recording {recording_id}: {existing_task}")
-                
-                # If the task exists but is in PENDING state, it might be in queue or lost
-                # Check how long ago it was submitted based on metadata
-                if existing_task["status"] == "PENDING":
-                    if (db_recording.recording_metadata and 
-                        "transcoding_started_at" in db_recording.recording_metadata):
-                        started_at = datetime.fromisoformat(db_recording.recording_metadata["transcoding_started_at"])
-                if (datetime.now() - started_at) > timedelta(minutes=10):
-                            logger.warning(f"Task for recording {recording_id} has been pending for >10 min, might be stuck")
-                            # We'll start a new task below
-                else:
-                            # Task is in queue and not too old
-                    return {
-                        "stream_url": stream_url,
-                        "format": "hls",
-                        "mime_type": "application/vnd.apple.mpegurl",
-                        "status": "processing",
-                        "task_id": existing_task["task_id"],
-                        "message": "Your video is being processed. Please check back in a few moments. 123"
-                    }
-                
-                # If task is in progress, return status
-                if existing_task["status"] in ["STARTED", "PROGRESS"]:
-                    return {
-                        "stream_url": stream_url,
-                        "format": "hls",
-                        "mime_type": "application/vnd.apple.mpegurl",
-                        "status": "processing",
-                        "task_id": existing_task["task_id"],
-                        "message": "Your video is being processed. Please check back in a few moments. 456"
-                    }
-                
-                # If task has completed, update DB and return ready status
-                elif existing_task["status"] == "SUCCESS":
-                    # Double check if the HLS files exist
-                    if os.path.exists(os.path.join(hls_output_dir, "playlist.m3u8")):
-                        # Update metadata if not already updated
-                        if (not db_recording.recording_metadata or 
-                            db_recording.recording_metadata.get("transcoding_status") != "completed"):
-                            
-                            # Add HLS information to metadata
-                            metadata = db_recording.recording_metadata or {}
-                            metadata.update({
-                                "hls_path": hls_output_dir,
-                                "processed": True,
-                                "transcoding_status": "completed",
-                                "transcoding_completed_at": datetime.now().isoformat()
-                            })
-                            
-                            # Update database
-                            db_recording.recording_metadata = metadata
-                            db.commit()
-                            db.refresh(db_recording)
-                        
-                        # Get video info from metadata or use empty dict
-                        video_info = db_recording.recording_metadata.get("video_info", {})
-                        
-                        return {
-                            "stream_url": stream_url,
-                            "format": "hls",
-                            "mime_type": "application/vnd.apple.mpegurl",
-                            "video_info": video_info,
-                            "status": "ready"
-                        }
-                
-                # If task has failed, return error status
-                elif existing_task["status"] in ["FAILURE", "REVOKED"]:
-                    error_msg = existing_task.get("error", "Unknown error")
-                    
-                    # Update metadata if not already updated
-                    if (not db_recording.recording_metadata or 
-                        db_recording.recording_metadata.get("transcoding_status") != "failed"):
-                        
-                        metadata = db_recording.recording_metadata or {}
-                        metadata.update({
-                            "transcoding_status": "failed",
-                            "transcoding_error": error_msg,
-                            "transcoding_completed_at": datetime.now().isoformat(),
-                            "can_retry": True
-                        })
-                        
-                        # Update database
-                        db_recording.recording_metadata = metadata
-                        db.commit()
-                        db.refresh(db_recording)
-                    
-                    return {
-                        "status": "failed",
-                        "error": error_msg,
-                        "message": f"Processing failed: {error_msg}",
-                        "can_retry": True,
-                        "retry_url": f"/recordings/retry-processing/{recording_id}"
-                    }
-
-        except Exception as e:
-            logger.error(f"Error checking task status: {str(e)}")
-            # Continue to process the video if we can't determine status
-        
-        # If we get here, we need to start/restart processing
-        # Update metadata to indicate processing has started
-        metadata = db_recording.recording_metadata or {}
-        metadata.update({
-            "transcoding_status": "in_progress",
-            "transcoding_started_at": datetime.now().isoformat()
-        })
-        
-        try:
-            db_recording.recording_metadata = metadata
-            db.commit()
-            db.refresh(db_recording)
-            logger.info(f"Marked recording {recording_id} as processing")
-        except Exception as e:
-            logger.error(f"Failed to update recording metadata: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Failed to update recording metadata: {str(e)}")
-
-        # Submit task to Celery worker
-        try:
-            task_id = await submit_processing_job(recording_id)
-            
-            # Check if task_id indicates a fallback/dummy task due to Redis connection issues
-            if task_id and task_id.startswith("local-fallback-"):
-                logger.warning(f"Using fallback task ID due to Redis connection issues: {task_id}")
-                
-                # Return status indicating Redis issues but video will be processed 
-                return {
-                    "stream_url": stream_url,
-                    "format": "hls",
-                    "mime_type": "application/vnd.apple.mpegurl",
-                    "status": "delayed_processing",
-                    "task_id": task_id,
-                    "message": "Your video will be processed when the system recovers. Please check back later."
-                }
-            
-            # Add task_id to the response
             return {
                 "stream_url": stream_url,
+                "title": f"{db_recording.stream_name} - Recording {recording_id}",
                 "format": "hls",
-                "mime_type": "application/vnd.apple.mpegurl",
-                "status": "processing",
-                "task_id": task_id,
-                "message": "Your video is being processed. Please check back in a few moments."
+                "status": "ready",
+                "hls_path": db_recording.s3_hls_path,
+                "environment": "aws"
             }
-        except Exception as e:
-            logger.error(f"Failed to submit processing job: {str(e)}")
             
-            # Update status to indicate the error but allow user to retry later
-            try:
-                error_metadata = db_recording.recording_metadata or {}
-                error_metadata.update({
-                    "transcoding_status": "failed",
-                    "transcoding_error": f"Queue connection error: {str(e)}",
-                    "can_retry": True
-                })
-                db_recording.recording_metadata = error_metadata
-                db.commit()
-            except Exception as db_error:
-                logger.error(f"Additionally failed to update error status: {str(db_error)}")
-            
-            # Return a more user-friendly error
-            return {
-                "stream_url": stream_url,
-                "format": "hls", 
-                "mime_type": "application/vnd.apple.mpegurl",
-                "status": "queue_error",
-                "error": "Processing system temporarily unavailable",
-                "retry_url": f"/recordings/retry-processing/{recording_id}",
-                "message": "The video processing system is temporarily unavailable. Please try again later."
-            }
-        
+        # Check for local environment with local HLS path
+        if db_recording.environment == "local" and db_recording.local_hls_path:
+            # Verify that the HLS playlist exists
+            playlist_path = os.path.join(db_recording.local_hls_path, "playlist.m3u8")
+            if os.path.exists(playlist_path):
+                logger.info(f"Using local HLS path for recording {recording_id}: {db_recording.local_hls_path}")
+                
+                return {
+                    "stream_url": stream_url,
+                    "title": f"{db_recording.stream_name} - Recording {recording_id}",
+                    "format": "hls",
+                    "status": "ready",
+                    "hls_path": db_recording.local_hls_path,
+                    "environment": "local"
+                }
+            else:
+                logger.warning(f"Local HLS playlist not found at {playlist_path}")
+                
+        # If no HLS files are available, return an error
+        logger.error(f"No HLS files available for recording {recording_id}")
+        raise HTTPException(
+            status_code=404, 
+            detail="HLS files not available for this recording. The recording may still be processing or failed to convert."
+        )
+                
     except HTTPException:
-        # Re-raise HTTP exceptions to preserve their status code and detail
         raise
     except Exception as e:
         logger.error(f"Error streaming recording {recording_id}: {str(e)}")
@@ -549,6 +346,9 @@ async def get_hls_file(
     Uses a signed token for authentication instead of requiring user authentication for each request.
     This allows for better caching and compatibility with video players.
     
+    In AWS mode, serves files directly from S3 using pre-signed URLs.
+    In local mode, serves files from the local filesystem.
+    
     Args:
         recording_id: ID of the recording
         file_name: Name of the HLS file to serve
@@ -556,7 +356,7 @@ async def get_hls_file(
         db: Database session
     
     Returns:
-        FileResponse containing the requested HLS file
+        FileResponse containing the requested HLS file or RedirectResponse to S3 URL
     """
     try:
         # For playlist requests, verify the token
@@ -570,8 +370,7 @@ async def get_hls_file(
                 logger.info(f"Received token: {token}")
                 
                 # URL decode the token
-                from urllib.parse import unquote
-                decoded_token = unquote(token)
+                decoded_token = urllib.parse.unquote(token)
                 logger.info(f"Decoded token: {decoded_token}")
 
                 # Log the temp token secret being used
@@ -621,51 +420,97 @@ async def get_hls_file(
                     logger.error(f"User {user_id} does not have access to recording {recording_id}")
                     raise HTTPException(status_code=403, detail="You do not have permission to access this recording")
                     
-            # Check if HLS processing is complete
-            if not (db_recording.recording_metadata and 
-                    (db_recording.recording_metadata.get("transcoding_status") == "completed" or
-                     db_recording.recording_metadata.get("processed", False) == True)):
-                logger.error(f"Recording {recording_id} HLS processing not complete")
-                raise HTTPException(status_code=400, detail="Recording HLS processing not complete")
+            # Check if HLS files are available
+            if db_recording.environment == "aws" and not db_recording.s3_hls_path:
+                logger.error(f"Recording {recording_id} has no S3 HLS path")
+                raise HTTPException(status_code=404, detail="HLS files not available")
+            elif db_recording.environment == "local" and not db_recording.local_hls_path:
+                logger.error(f"Recording {recording_id} has no local HLS path")
+                raise HTTPException(status_code=404, detail="HLS files not available")
         else:
             # For segment requests (.ts files), we don't verify the token
             # This is safe because:
             # 1. Segment names are hard to guess
             # 2. Segments are meaningless without the playlist
             # 3. This allows for better caching
-            pass
             
-        file_path = os.path.join(HLS_DIR, recording_id, file_name)
+            # Get recording from database (still need it for S3 paths)
+            db_recording = crud.get_recording(db, recording_id=int(recording_id))
+            if db_recording is None:
+                logger.error(f"Recording {recording_id} not found")
+                raise HTTPException(status_code=404, detail="Recording not found")
         
-        if not os.path.exists(file_path):
-            logger.error(f"HLS file not found: {file_path}")
-            raise HTTPException(status_code=404, detail="HLS file not found")
+        # Check if we're in AWS mode and have an S3 path for HLS files
+        is_aws_mode = db_recording.environment == "aws"
+        has_s3_hls_path = db_recording.s3_hls_path is not None
+        
+        if is_aws_mode and has_s3_hls_path:
+            # Serve from S3
+            from fastapi.responses import RedirectResponse
             
-        # Set content type based on file extension
-        content_type = "application/vnd.apple.mpegurl" if file_name.endswith('.m3u8') else "video/mp2t"
-        
-        # Ensure the file path is within the HLS directory (security check)
-        abs_hls_dir = os.path.abspath(HLS_DIR)
-        abs_file_path = os.path.abspath(file_path)
-        if not abs_file_path.startswith(abs_hls_dir):
-            logger.error(f"Invalid file path: {file_path}")
-            raise HTTPException(status_code=400, detail="Invalid file path")
-        
-        response = FileResponse(
-            path=file_path,
-            media_type=content_type,
-            filename=file_name
-        )
-        
-        # Add caching headers for better performance
-        if file_name.endswith('.ts'):
-            # Cache segments for 1 year (they are immutable)
-            response.headers["Cache-Control"] = "public, max-age=31536000"
+            hls_s3_path = db_recording.s3_hls_path
+            logger.info(f"Serving HLS file from S3: {hls_s3_path}/{file_name}")
+            
+            # Generate a pre-signed URL for the HLS file
+            s3_url = get_s3_hls_file_url(hls_s3_path, file_name)
+            if not s3_url:
+                logger.error(f"Failed to generate S3 URL for HLS file: {file_name}")
+                raise HTTPException(status_code=500, detail="Failed to generate S3 URL")
+            
+            # Set appropriate content type
+            content_type = "application/vnd.apple.mpegurl" if file_name.endswith('.m3u8') else "video/mp2t"
+            
+            # Create redirect response
+            response = RedirectResponse(url=s3_url)
+            response.headers["Content-Type"] = content_type
+            
+            # Add caching headers based on file type
+            if file_name.endswith('.ts'):
+                # Cache segments for 1 year (they are immutable)
+                response.headers["Cache-Control"] = "public, max-age=31536000"
+            else:
+                # Don't cache playlists
+                response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+                
+            return response
         else:
-            # Don't cache playlists
-            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            # Serve from local filesystem using the local_hls_path from the database
+            if not db_recording.local_hls_path:
+                logger.error(f"No local HLS path available for recording {recording_id}")
+                raise HTTPException(status_code=404, detail="Local HLS path not available")
+                
+            file_path = os.path.join(db_recording.local_hls_path, file_name)
+            logger.info(f"Serving local HLS file: {file_path}")
             
-        return response
+            if not os.path.exists(file_path):
+                logger.error(f"HLS file not found: {file_path}")
+                raise HTTPException(status_code=404, detail="HLS file not found")
+                
+            # Set content type based on file extension
+            content_type = "application/vnd.apple.mpegurl" if file_name.endswith('.m3u8') else "video/mp2t"
+            
+            # Ensure the file path is within the recording's HLS directory (security check)
+            abs_hls_dir = os.path.abspath(db_recording.local_hls_path)
+            abs_file_path = os.path.abspath(file_path)
+            if not abs_file_path.startswith(abs_hls_dir):
+                logger.error(f"Invalid file path: {file_path}")
+                raise HTTPException(status_code=400, detail="Invalid file path")
+            
+            response = FileResponse(
+                path=file_path,
+                media_type=content_type,
+                filename=file_name
+            )
+            
+            # Add caching headers for better performance
+            if file_name.endswith('.ts'):
+                # Cache segments for 1 year (they are immutable)
+                response.headers["Cache-Control"] = "public, max-age=31536000"
+            else:
+                # Don't cache playlists
+                response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+                
+            return response
         
     except HTTPException:
         raise
@@ -783,8 +628,8 @@ async def get_debug_video_player(recording_id: int, db: Session = Depends(databa
     file_format = "mp4"  # Default to mp4
     if db_recording.recording_metadata and "file_format" in db_recording.recording_metadata:
         file_format = db_recording.recording_metadata["file_format"]
-    elif db_recording.file_path:
-        file_format = os.path.splitext(db_recording.file_path)[1].lstrip('.')
+    elif db_recording.local_mp4_path:
+        file_format = os.path.splitext(db_recording.local_mp4_path)[1].lstrip('.')
     
     # Create the HLS or direct playback code separately to avoid backslash issues in f-strings
     if has_hls:
@@ -882,8 +727,8 @@ async def get_recording_playback_info(
     file_format = "mp4"  # Default to mp4
     if db_recording.recording_metadata and "file_format" in db_recording.recording_metadata:
         file_format = db_recording.recording_metadata["file_format"]
-    elif db_recording.file_path:
-        file_format = os.path.splitext(db_recording.file_path)[1].lstrip('.')
+    elif db_recording.local_mp4_path:
+        file_format = os.path.splitext(db_recording.local_mp4_path)[1].lstrip('.')
     
     # Build response with all available playback options
     response = {
@@ -1100,17 +945,28 @@ async def get_recording_status(
                 
             # Add HLS info if complete
             if status == "completed":
-                response["hls_path"] = db_recording.recording_metadata.get("hls_path")
+                # Use the appropriate HLS path based on environment
+                if db_recording.environment == "local":
+                    response["hls_path"] = db_recording.local_hls_path
+                else:
+                    response["hls_path"] = db_recording.s3_hls_path
                 response["video_info"] = db_recording.recording_metadata.get("video_info", {})
                 
             return response
             
         # Check for legacy "processed" flag
         elif "processed" in db_recording.recording_metadata and db_recording.recording_metadata["processed"]:
+            # Use the appropriate HLS path based on environment
+            hls_path = None
+            if db_recording.environment == "local":
+                hls_path = db_recording.local_hls_path
+            else:
+                hls_path = db_recording.s3_hls_path
+                
             return {
                 "id": recording_id,
                 "status": "completed",
-                "hls_path": db_recording.recording_metadata.get("hls_path"),
+                "hls_path": hls_path,
                 "processed_at": db_recording.recording_metadata.get("processed_at"),
                 "video_info": db_recording.recording_metadata.get("video_info", {})
             }
@@ -1172,36 +1028,40 @@ async def get_recording_processing_status(
                 raise HTTPException(status_code=403, detail="You do not have permission to access this recording")
         
         # Check if there's a ready HLS version
-        if (db_recording.recording_metadata and 
-            "hls_path" in db_recording.recording_metadata and 
-            os.path.exists(os.path.join(db_recording.recording_metadata.get("hls_path", ""), "playlist.m3u8"))):
+        hls_path = None
+        hls_exists = False
+        
+        if db_recording.environment == "local" and db_recording.local_hls_path:
+            hls_path = db_recording.local_hls_path
+            hls_exists = os.path.exists(os.path.join(hls_path, "playlist.m3u8"))
+        elif db_recording.environment == "aws" and db_recording.s3_hls_path:
+            hls_path = db_recording.s3_hls_path
+            hls_exists = True  # Assume S3 files exist if path is set
             
+        if hls_exists:
             # Check if transcoding is completed
-            if (db_recording.recording_metadata.get("transcoding_status") == "completed" or
-                db_recording.recording_metadata.get("processed", False) == True):
+            if (db_recording.recording_metadata and 
+                (db_recording.recording_metadata.get("transcoding_status") == "completed" or
+                 db_recording.recording_metadata.get("processed", False) == True)):
                 
                 return {
                     "recording_id": recording_id,
                     "status": "ready",
-                    "hls_path": db_recording.recording_metadata.get("hls_path"),
-                    "completed_at": db_recording.recording_metadata.get("transcoding_completed_at"),
-                    "video_info": db_recording.recording_metadata.get("video_info", {})
+                    "hls_path": hls_path,
+                    "completed_at": db_recording.recording_metadata.get("transcoding_completed_at") if db_recording.recording_metadata else None,
+                    "video_info": db_recording.recording_metadata.get("video_info", {}) if db_recording.recording_metadata else {}
                 }
                 
         # Check for processing task
         try:
-            from app.services.video_processor import check_task_exists
             existing_task = await check_task_exists(recording_id)
             
             if existing_task:
-                # Translate Celery task status to our status format
+                # Translate processing task status to our status format
                 status_map = {
-                    "PENDING": "queued",
-                    "STARTED": "processing",
-                    "PROGRESS": "processing",
-                    "SUCCESS": "completed",
-                    "FAILURE": "failed",
-                    "REVOKED": "cancelled"
+                    "processing": "processing",
+                    "completed": "completed",
+                    "failed": "failed"
                 }
                 
                 client_status = status_map.get(existing_task["status"], "unknown")
@@ -1209,8 +1069,7 @@ async def get_recording_processing_status(
                 response = {
                     "recording_id": recording_id,
                     "status": client_status,
-                    "task_id": existing_task["task_id"],
-                    "celery_status": existing_task["status"]
+                    "task_id": existing_task["task_id"]
                 }
                 
                 # Add error message if failed

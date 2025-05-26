@@ -29,10 +29,8 @@ ssh -i "$API_SSH_KEY_PATH" "$SSH_USER@$API_PUBLIC_IP" '
         done &
     }
 
-    # Start monitoring each container
+    # Start monitoring API server container
     print_logs "api-server-container" "API"
-    print_logs "redis-container" "REDIS"
-    print_logs "celery-worker-container" "CELERY"
 
     # Wait for any process to exit
     wait
@@ -40,9 +38,5 @@ ssh -i "$API_SSH_KEY_PATH" "$SSH_USER@$API_PUBLIC_IP" '
     timestamp=$(date "+%Y-%m-%d %H:%M:%S")
     if [[ $line == \[API\]* ]]; then
         echo -e "${GREEN}[$timestamp]${line}${NC}"
-    elif [[ $line == \[REDIS\]* ]]; then
-        echo -e "${BLUE}[$timestamp]${line}${NC}"
-    elif [[ $line == \[CELERY\]* ]]; then
-        echo -e "${RED}[$timestamp]${line}${NC}"
     fi
 done 
